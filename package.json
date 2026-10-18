@@ -25,6 +25,14 @@
   ],
   "license": "MIT",
   "author": "hanxu131",
+  "homepage": "https://github.com/ECHOUniverse/dsh-notice#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ECHOUniverse/dsh-notice.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ECHOUniverse/dsh-notice/issues"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",
