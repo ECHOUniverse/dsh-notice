@@ -20,8 +20,12 @@ DeepSeek Harness 桌面版的 macOS 系统通知插件：agent **完成**、**�
 
 安装后需要**完全退出并重启 DeepSeek Harness**（仅关闭窗口不够），插件才会加载。重启后打开「插件」页，在 `@hanxu131/dsh-notice` 的 `notice` 行点「配置」即可打开设置页。
 
-> 安装/更新插件后，重启前 App 里不会出现该插件。若只想确认识别结果，可用
-> `dsh --profile desktop --dump-config | grep dsh-notice` 查看合成后的配置层。
+> 安装/更新插件后，重启前 App 里不会出现该插件。想确认安装结果，可以看
+> `~/.dsh/profiles/desktop/package.json` 的 `dsh.profile.bundles` 是否包含
+> `@hanxu131/dsh-notice`，以及 `~/.dsh/profiles/desktop/node_modules/@hanxu131/dsh-notice`
+> 是否指向本项目。注意：`dsh --profile desktop --dump-config` **不可用**——桌面版 profile
+> 由 Electron App 独占管理，CLI 会直接报
+> `profile "desktop" is managed exclusively by the Electron application`。
 
 ## 配置项
 
