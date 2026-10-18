@@ -57,6 +57,7 @@ DeepSeek Harness 桌面版的 macOS 系统通知插件：agent **完成**、**�
 - **首条通知可能被系统吞掉**：macOS 的通知授权是系统级状态，与浏览器侧的 `Notification.permission` 不是一回事。授权尚未决定时，第一条通知会被静默丢弃；用设置页的「发送测试通知」确认一次即可。系统授权被拒后通知会被静默丢弃，而 `Notification.permission` 仍显示 `granted`。
 - **依赖桌面 App 的安全上下文**：通知由 Electron 渲染进程以 DeepSeek Harness 的 bundle 身份投递；在普通浏览器里跑 `dsh web` 时，发送者会变成浏览器自己，而不是 DeepSeek Harness。
 - **没有服务端兜底通道**：这是 [ADR 0001](docs/adr/0001-notification-channel.md) 的明确取舍——只保证身份正确、可点击、可前台抑制，不保证 App 退出后的送达。
+- **子智能体会话不发通知**：`origin === 'subagent'` 的子会话被过滤，避免子任务完成时打扰你。
 - **同一会话同时存在多个待处理交互时只通知一个**：`ctx.uiSession.sessionStatus` 每个会话只暴露优先级最高的一个 `pendingInteraction`（官方按 plan-review > question / approval 选择），因此同会话并发的其它交互不会各发一条通知。
 - **点击通知只把窗口带到前台**：跳转到具体会话是 M2 的范围，本期只保留 `sessionId` 供后续实现。
 - 需要 DSH `>=0.2.1-rc.1 <0.3.0-0`。

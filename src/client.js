@@ -8,17 +8,6 @@ window.__ModuleLoader__.load({
 		var React = require('react');
 		var primitives = require('@deepseek-ai/dsh-client-ui-primitives');
 
-		/** TEMPORARY M1 acceptance diagnostics; remove once the question trigger is verified. */
-		var DEBUG = true;
-
-		/** Console-only diagnostic that can never break the plugin. */
-		function debugLog() {
-			if (!DEBUG) return;
-			try {
-				console.info.apply(console, ['[dsh-notice]'].concat(Array.prototype.slice.call(arguments)));
-			} catch (error) {}
-		}
-
 		/**
 		 * Browser half of `@hanxu131/dsh-notice`.
 		 *
@@ -212,9 +201,7 @@ window.__ModuleLoader__.load({
 				}
 			} catch (error) {
 				// The form is not served yet (or at all): defaults are safe.
-				debugLog('config:fallback', String(error));
 			}
-			debugLog('config', resolved);
 			return resolved;
 		}
 
@@ -479,7 +466,6 @@ window.__ModuleLoader__.load({
 		function showNotification(t, kind, sessionId, payload, config, facts) {
 			if (typeof Notification === 'undefined') return;
 			var copy = composeNotification(t, kind, payload, config, facts);
-			debugLog('notify:send', kind, sessionId, copy.title, copy.body);
 			var silent = isSilent(config, kind);
 			if (config.replaceBySession !== false) closeSession(sessionId);
 			try {
@@ -558,26 +544,11 @@ window.__ModuleLoader__.load({
 		 */
 		function notify(ctx, t, sessionId, kind, payload) {
 			try {
-				var foreground = isForeground();
-				debugLog('focus', foreground);
-				if (sessionId === undefined || sessionId === null) {
-					debugLog('notify:skip', kind, 'no-session');
-					return;
-				}
 				var config = readConfig(ctx);
-				if (!isTriggerEnabled(config, kind)) {
-					debugLog('notify:skip', kind, 'disabled');
-					return;
-				}
-				if (foreground) {
-					debugLog('notify:skip', kind, 'foreground');
-					return;
-				}
+				if (!isTriggerEnabled(config, kind)) return;
+				if (isForeground()) return;
 				var facts = sessionFacts(ctx, sessionId);
-				if (isSubagent(sessionId, facts)) {
-					debugLog('notify:skip', kind, 'subagent');
-					return;
-				}
+				if (isSubagent(sessionId, facts)) return;
 				showNotification(t, kind, sessionId, payload, config, facts);
 			} catch (error) {
 				console.warn('[dsh-notice] notification dispatch failed', error);
@@ -1132,7 +1103,6 @@ window.__ModuleLoader__.load({
 			ctx.effect(function () {
 				var source = ctx.uiSession === undefined || ctx.uiSession === null ? undefined : ctx.uiSession.sessionStatus;
 				if (source === undefined || source === null || typeof source.getSnapshot !== 'function' || typeof source.subscribe !== 'function') {
-					debugLog('pending:unavailable');
 					return function () {};
 				}
 
@@ -1162,16 +1132,11 @@ window.__ModuleLoader__.load({
 						});
 						for (var index = 0; index < cleared.length; index += 1) {
 							announcedPending.delete(cleared[index]);
-							debugLog('pending:cleared', cleared[index]);
 						}
 						current.forEach(function (interaction, sessionId) {
 							if (announcedPending.get(sessionId) === interaction.key) return;
-							if (interaction.kind !== 'approval' && interaction.kind !== 'question' && interaction.kind !== 'plan-review') {
-								debugLog('pending:ignored', interaction.kind, sessionId);
-								return;
-							}
+							if (interaction.kind !== 'approval' && interaction.kind !== 'question' && interaction.kind !== 'plan-review') return;
 							announcedPending.set(sessionId, interaction.key);
-							debugLog('pending', interaction.kind, sessionId, interaction.key);
 							if (interaction.kind === 'approval') {
 								notify(ctx, t, sessionId, 'approval', {
 									toolName: interaction.toolName,
@@ -1245,14 +1210,6 @@ window.__ModuleLoader__.load({
 					announcedPending.clear();
 				};
 			}, 'notice: live notifications');
-
-			debugLog('applied', {
-				inject: inject,
-				hasRemote: !!ctx.remote,
-				hasSessions: !!ctx.sessions,
-				hasConfigForms: !!ctx.configForms,
-				hasUiSession: !!ctx.uiSession,
-			});
 		}
 		//#endregion
 
