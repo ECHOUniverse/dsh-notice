@@ -9,9 +9,11 @@
 | 触发 | 客户端来源 | 文案（脱敏模式） |
 |---|---|---|
 | 最终完成 | `api-session/status` 变为 `running === false` | `已完成 · <耗时>` |
-| 询问 | `user-questions/request`（waterfall 旁听，必须 `return next()`） | `等待你回答 <n> 个问题` |
-| 权限 | `approval/request`（同上） | `请求权限：<工具名>` |
+| 询问 | `ctx.uiSession.sessionStatus` 的 `pendingInteraction.kind` 为 `question` / `plan-review` | `等待你回答 <n> 个问题` |
+| 权限 | 同源的 `pendingInteraction.kind === 'approval'` | `请求权限：<工具名>` |
 | 错误 | `api-session/error` | `运行失败：<错误码或首句>` |
+
+**为什么不用 waterfall**：`user-questions/request` 与 `approval/request` 会被官方 UI 插件 claim（返回答案即终止链路），而第三方插件行排在 profile 末尾，监听器永远收不到。触发源因此改为 `uiSession.sessionStatus`，详见 [ADR 0003](adr/0003-pending-interactions-over-waterfall.md)。
 
 **判定与抑制**：
 
@@ -88,7 +90,7 @@ src/client.js  客户端半：手写 __ModuleLoader__ 外壳（ADR 0002），构
 - [ ] 点「发送测试通知」→ 弹出身份为 DeepSeek Harness 的横幅
 - [ ] 窗口**失焦**时跑一个 >10s 的任务 → 收到「已完成」通知
 - [ ] 窗口**聚焦**时完成同一任务 → **不**收到通知
-- [ ] `ask_user_question` 触发的询问 → 收到通知，且 Web 上问题卡片仍可正常回答（waterfall 未被劫持）
+- [ ] `ask_user_question` 触发的询问 → 收到通知，且 Web 上问题卡片仍可正常回答
 - [ ] 触发一次权限询问（如需要审批的 bash）→ 收到通知，审批流程正常
 - [ ] 制造一次运行失败 → 收到错误通知
 - [ ] 同一会话连续两次通知 → 通知中心只留最新一条
