@@ -1166,6 +1166,10 @@ window.__ModuleLoader__.load({
 						}
 						current.forEach(function (interaction, sessionId) {
 							if (announcedPending.get(sessionId) === interaction.key) return;
+							if (interaction.kind !== 'approval' && interaction.kind !== 'question' && interaction.kind !== 'plan-review') {
+								debugLog('pending:ignored', interaction.kind, sessionId);
+								return;
+							}
 							announcedPending.set(sessionId, interaction.key);
 							debugLog('pending', interaction.kind, sessionId, interaction.key);
 							if (interaction.kind === 'approval') {
@@ -1176,13 +1180,9 @@ window.__ModuleLoader__.load({
 								});
 								return;
 							}
-							if (interaction.kind === 'question' || interaction.kind === 'plan-review') {
-								notify(ctx, t, sessionId, 'question', {
-									count: Array.isArray(interaction.questions) ? interaction.questions.length : 1,
-								});
-								return;
-							}
-							debugLog('pending:ignored', interaction.kind, sessionId);
+							notify(ctx, t, sessionId, 'question', {
+								count: Array.isArray(interaction.questions) ? interaction.questions.length : 1,
+							});
 						});
 					} catch (error) {
 						console.warn('[dsh-notice] pending interaction handler failed', error);
