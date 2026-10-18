@@ -5,6 +5,9 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
 
+		var React = require('react');
+		var primitives = require('@deepseek-ai/dsh-client-ui-primitives');
+
 		/**
 		 * Browser half of `@hanxu131/dsh-notice`.
 		 *
@@ -527,6 +530,341 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 
+		//#region settings page
+		/** Raw React element factory: this bundle never uses JSX (ADR 0002). */
+		var h = React.createElement;
+		/** Toggle switches, one per trigger kind. */
+		var TRIGGER_FIELDS = [
+			{ field: 'notifyOnComplete', label: 'settings.notifyOnComplete', hint: 'settings.notifyOnCompleteHint' },
+			{ field: 'notifyOnQuestion', label: 'settings.notifyOnQuestion', hint: 'settings.notifyOnQuestionHint' },
+			{ field: 'notifyOnApproval', label: 'settings.notifyOnApproval', hint: 'settings.notifyOnApprovalHint' },
+			{ field: 'notifyOnError', label: 'settings.notifyOnError', hint: 'settings.notifyOnErrorHint' },
+		];
+		/** Remaining boolean fields, rendered as switches. */
+		var CONTENT_FIELDS = [
+			{ field: 'redact', label: 'settings.redact', hint: 'settings.redactHint' },
+			{ field: 'showSessionTitle', label: 'settings.showSessionTitle', hint: 'settings.showSessionTitleHint' },
+			{ field: 'replaceBySession', label: 'settings.replaceBySession', hint: 'settings.replaceBySessionHint' },
+		];
+		/** Segmented sound-policy choices. */
+		var SOUND_OPTIONS = [
+			{ value: 'smart', labelKey: 'settings.soundSmart' },
+			{ value: 'all', labelKey: 'settings.soundAll' },
+			{ value: 'none', labelKey: 'settings.soundNone' },
+		];
+		/** Snapshot returned before a form is handed to the page. */
+		var EMPTY_FORM_SNAPSHOT = { status: 'loading', value: undefined, writable: false, revision: undefined };
+		/** Snapshot used when the form cannot be read at all. */
+		var UNAVAILABLE_FORM_SNAPSHOT = { status: 'unavailable', value: undefined, writable: false, revision: undefined };
+		/** Strong references to test notifications so Electron keeps them visible. */
+		var testNotifications = new Set();
+		/** Inline styles keeping the page inside DSH's theme without a stylesheet. */
+		var SETTINGS_STYLES = {
+			root: { display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '720px', color: 'var(--dsw-alias-label-primary)', fontSize: '13px', lineHeight: '20px' },
+			section: { display: 'flex', flexDirection: 'column', gap: '2px' },
+			sectionTitle: { margin: '0 0 4px', fontSize: '14px', fontWeight: 500, lineHeight: '22px' },
+			row: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', padding: '10px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
+			rowMain: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: '0' },
+			label: { fontWeight: 500 },
+			hint: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', lineHeight: '18px' },
+			note: { color: 'var(--dsw-alias-label-tertiary)' },
+			error: { color: 'var(--dsw-alias-state-error-primary)' },
+			permissionValue: { flex: 'none', color: 'var(--dsw-alias-label-secondary)' },
+		};
+
+		/** Identity translate used when a slot renders without a locale seat. */
+		function identityTranslate(key) {
+			return key;
+		}
+
+		/** Whether the renderer has the browser Notification API at all. */
+		function notificationSupported() {
+			return typeof Notification !== 'undefined';
+		}
+
+		/** Read the browser-side permission state without throwing. */
+		function readNotificationPermission() {
+			if (!notificationSupported()) return 'unsupported';
+			try {
+				return Notification.permission || 'default';
+			} catch (error) {
+				return 'default';
+			}
+		}
+
+		/** Localized label key for a permission value. */
+		function permissionLabelKey(permission) {
+			if (permission === 'granted') return 'settings.permissionGranted';
+			if (permission === 'denied') return 'settings.permissionDenied';
+			if (permission === 'unsupported') return 'settings.permissionUnsupported';
+			return 'settings.permissionDefault';
+		}
+
+		/** Optional hint key for a permission value. */
+		function permissionHintKey(permission) {
+			if (permission === 'denied') return 'settings.permissionDeniedHint';
+			if (permission === 'default') return 'settings.permissionDefaultHint';
+			return undefined;
+		}
+
+		/**
+		 * Send the settings page's test notification, bypassing foreground
+		 * suppression and configuration on purpose: it is the only probe for the
+		 * macOS-level authorization that `Notification.permission` cannot see.
+		 *
+		 * @param t - translate function.
+		 * @returns whether a notification object was created.
+		 */
+		function sendTestNotification(t) {
+			if (!notificationSupported()) return { ok: false };
+			try {
+				var notification = new Notification(t('settings.testTitle'), {
+					body: t('settings.testBody'),
+					silent: false,
+				});
+				testNotifications.add(notification);
+				notification.onclick = function () {
+					try {
+						window.focus();
+					} catch (error) {
+						// Focus is best-effort.
+					}
+					testNotifications.delete(notification);
+					try {
+						notification.close();
+					} catch (error) {
+						// Already dismissed.
+					}
+				};
+				notification.onclose = function () {
+					testNotifications.delete(notification);
+				};
+				return { ok: true };
+			} catch (error) {
+				console.warn('[dsh-notice] failed to show test notification', error);
+				return { ok: false };
+			}
+		}
+
+		/** Merge defaults, the current form value, and optimistic local edits. */
+		function effectiveValues(snapshotValue, pending) {
+			var values = {};
+			for (var key in DEFAULT_CONFIG) values[key] = DEFAULT_CONFIG[key];
+			if (snapshotValue && typeof snapshotValue === 'object') {
+				for (var field in DEFAULT_CONFIG) {
+					if (snapshotValue[field] !== undefined && snapshotValue[field] !== null) values[field] = snapshotValue[field];
+				}
+			}
+			for (var edited in pending) values[edited] = pending[edited];
+			return values;
+		}
+
+		/** Render the enabled-count summary shown on a plugin card. */
+		function summaryText(t, enabledCount) {
+			if (enabledCount >= 4) return t('settings.summaryOn');
+			if (enabledCount <= 0) return t('settings.summaryOff');
+			return t('settings.summaryPartial', { count: enabledCount });
+		}
+
+		/** Render one labelled switch row. */
+		function switchRow(t, item, checked, disabled, onCommit) {
+			return h('div', { key: item.field, style: SETTINGS_STYLES.row }, [
+				h('div', { key: 'main', style: SETTINGS_STYLES.rowMain }, [
+					h('span', { key: 'label', style: SETTINGS_STYLES.label }, t(item.label)),
+					h('span', { key: 'hint', style: SETTINGS_STYLES.hint }, t(item.hint)),
+				]),
+				h(primitives.Switch, {
+					key: 'switch',
+					checked: checked,
+					label: t(item.label),
+					disabled: disabled,
+					onChange: onCommit,
+				}),
+			]);
+		}
+
+		/**
+		 * The row configuration page registered into `plugins.row.config`.
+		 *
+		 * Writes are single-field mutations against the live config form: every
+		 * field is volatile, so a save is visible immediately and no staged form
+		 * frame is needed. Optimistic local values keep the control responsive
+		 * while the Host round-trip settles.
+		 *
+		 * @param props - `view`, the plugin-manager supplied `form`, and the slot's `t`.
+		 * @returns the summary line or the configuration page.
+		 */
+		function NoticeSettingsPage(props) {
+			var t = typeof props.t === 'function' ? props.t : identityTranslate;
+			var form = props.form;
+			var subscribe = React.useCallback(function (listener) {
+				if (form === undefined || form === null) return function () {};
+				return form.subscribe(listener);
+			}, [form]);
+			var getSnapshot = React.useCallback(function () {
+				if (form === undefined || form === null) return EMPTY_FORM_SNAPSHOT;
+				try {
+					return form.getSnapshot();
+				} catch (error) {
+					return UNAVAILABLE_FORM_SNAPSHOT;
+				}
+			}, [form]);
+			var snapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+			var pendingState = React.useState({});
+			var pending = pendingState[0];
+			var setPending = pendingState[1];
+			var permissionState = React.useState(readNotificationPermission);
+			var permission = permissionState[0];
+			var setPermission = permissionState[1];
+			var testFailedState = React.useState(false);
+			var testFailed = testFailedState[0];
+			var setTestFailed = testFailedState[1];
+
+			React.useEffect(function () {
+				function refresh() {
+					setPermission(readNotificationPermission());
+				}
+				refresh();
+				window.addEventListener('focus', refresh);
+				document.addEventListener('visibilitychange', refresh);
+				return function () {
+					window.removeEventListener('focus', refresh);
+					document.removeEventListener('visibilitychange', refresh);
+				};
+			}, [setPermission]);
+
+			if (form === undefined || form === null || snapshot.status === 'loading') {
+				return h('div', { style: SETTINGS_STYLES.note }, t('settings.loading'));
+			}
+			if (snapshot.status === 'unavailable') {
+				return h('div', { style: SETTINGS_STYLES.note }, t('settings.unavailable'));
+			}
+
+			var disabled = snapshot.writable === false;
+			var values = effectiveValues(snapshot.value, pending);
+
+			function dropPending(field) {
+				setPending(function (previous) {
+					var next = {};
+					for (var key in previous) {
+						if (key !== field) next[key] = previous[key];
+					}
+					return next;
+				});
+			}
+
+			function commit(field, value) {
+				setPending(function (previous) {
+					var next = {};
+					for (var key in previous) next[key] = previous[key];
+					next[field] = value;
+					return next;
+				});
+				setTestFailed(false);
+				try {
+					var settlement = form.set(field, value);
+					if (settlement && typeof settlement.then === 'function') {
+						settlement.then(function (accepted) {
+							if (accepted === false) dropPending(field);
+						}).catch(function () {
+							dropPending(field);
+						});
+					}
+				} catch (error) {
+					dropPending(field);
+				}
+			}
+
+			var enabledCount = 0;
+			for (var index = 0; index < TRIGGER_FIELDS.length; index += 1) {
+				if (values[TRIGGER_FIELDS[index].field] !== false) enabledCount += 1;
+			}
+
+			if (props.view === 'summary') {
+				return h('span', null, summaryText(t, enabledCount));
+			}
+
+			function onTest() {
+				var result = sendTestNotification(t);
+				setPermFromNotification();
+				setTestFailed(!result.ok);
+			}
+
+			function setPermFromNotification() {
+				setPermission(readNotificationPermission());
+			}
+
+			var hintKey = permissionHintKey(permission);
+			var children = [
+				h('section', { key: 'triggers', style: SETTINGS_STYLES.section }, [
+					h('h4', { key: 'title', style: SETTINGS_STYLES.sectionTitle }, t('settings.groupTriggers')),
+					TRIGGER_FIELDS.map(function (item) {
+						return switchRow(t, item, values[item.field] !== false, disabled, function (next) {
+							commit(item.field, next);
+						});
+					}),
+				]),
+				h('section', { key: 'content', style: SETTINGS_STYLES.section }, [
+					h('h4', { key: 'title', style: SETTINGS_STYLES.sectionTitle }, t('settings.groupContent')),
+					h('div', { key: 'sound', style: SETTINGS_STYLES.row }, [
+						h('div', { key: 'main', style: SETTINGS_STYLES.rowMain }, [
+							h('span', { key: 'label', style: SETTINGS_STYLES.label }, t('settings.soundPolicy')),
+							h('span', { key: 'hint', style: SETTINGS_STYLES.hint }, t('settings.soundPolicyHint')),
+						]),
+						h(primitives.SegmentedControl, {
+							key: 'control',
+							id: 'dsh-notice-sound',
+							value: values.soundPolicy,
+							label: t('settings.soundPolicy'),
+							disabled: disabled,
+							options: SOUND_OPTIONS.map(function (option) {
+								return { value: option.value, label: t(option.labelKey), disabled: disabled };
+							}),
+							onChange: function (next) {
+								commit('soundPolicy', next);
+							},
+						}),
+					]),
+					CONTENT_FIELDS.map(function (item) {
+						return switchRow(t, item, values[item.field] !== false, disabled, function (next) {
+							commit(item.field, next);
+						});
+					}),
+				]),
+				h('section', { key: 'maintenance', style: SETTINGS_STYLES.section }, [
+					h('h4', { key: 'title', style: SETTINGS_STYLES.sectionTitle }, t('settings.maintenance')),
+					h('div', { key: 'test', style: SETTINGS_STYLES.row }, [
+						h('div', { key: 'main', style: SETTINGS_STYLES.rowMain }, [
+							h('span', { key: 'label', style: SETTINGS_STYLES.label }, t('settings.test')),
+							h('span', { key: 'hint', style: SETTINGS_STYLES.hint }, testFailed ? t('settings.testUnavailable') : t('settings.testHint')),
+						]),
+						h(primitives.Button, {
+							key: 'button',
+							variant: 'outline',
+							size: 'sm',
+							onClick: onTest,
+							disabled: !notificationSupported(),
+						}, t('settings.test')),
+					]),
+					h('div', { key: 'permission', style: SETTINGS_STYLES.row }, [
+						h('div', { key: 'main', style: SETTINGS_STYLES.rowMain }, [
+							h('span', { key: 'label', style: SETTINGS_STYLES.label }, t('settings.permission')),
+							hintKey === undefined ? null : h('span', { key: 'hint', style: SETTINGS_STYLES.hint }, t(hintKey)),
+						]),
+						h('span', { key: 'value', style: SETTINGS_STYLES.permissionValue }, t(permissionLabelKey(permission))),
+					]),
+				]),
+			];
+
+			if (disabled) children.unshift(h('div', { key: 'readonly', style: SETTINGS_STYLES.note }, t('settings.readOnly')));
+
+			return h('div', { style: SETTINGS_STYLES.root }, children);
+		}
+
+		/** Key of this package's row configuration page. */
+		var SETTINGS_ROW_KEY = '@hanxu131/dsh-notice#notice';
+		//#endregion
+
 		//#region triggers
 		/** Required services: forwarded events, session catalog, config forms, copy, slots. */
 		var inject = ['remote', 'sessions', 'configForms', 'locale', 'slots'];
@@ -624,8 +962,26 @@ window.__ModuleLoader__.load({
 			}, 'notice: approval/request');
 
 			ctx.effect(function () {
+				return ctx.slots.inject('plugins.row.config', function () {
+					return ctx.slots.register({
+						name: 'plugins.row.config',
+						key: SETTINGS_ROW_KEY,
+						locale: NS,
+					}, NoticeSettingsPage);
+				});
+			}, 'notice: settings page');
+
+			ctx.effect(function () {
 				return function () {
 					closeAll();
+					testNotifications.forEach(function (notification) {
+						try {
+							notification.close();
+						} catch (error) {
+							// Already dismissed.
+						}
+					});
+					testNotifications.clear();
 					subagentSessions.clear();
 					runStartedAt.clear();
 				};
