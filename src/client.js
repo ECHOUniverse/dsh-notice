@@ -8,6 +8,17 @@ window.__ModuleLoader__.load({
 		var React = require('react');
 		var primitives = require('@deepseek-ai/dsh-client-ui-primitives');
 
+		/** TEMPORARY M1 acceptance diagnostics; remove once the question trigger is verified. */
+		var DEBUG = true;
+
+		/** Console-only diagnostic that can never break the plugin. */
+		function debugLog() {
+			if (!DEBUG) return;
+			try {
+				console.info.apply(console, ['[dsh-notice]'].concat(Array.prototype.slice.call(arguments)));
+			} catch (error) {}
+		}
+
 		/**
 		 * Browser half of `@hanxu131/dsh-notice`.
 		 *
@@ -201,7 +212,9 @@ window.__ModuleLoader__.load({
 				}
 			} catch (error) {
 				// The form is not served yet (or at all): defaults are safe.
+				debugLog('config:fallback', String(error));
 			}
+			debugLog('config', resolved);
 			return resolved;
 		}
 
@@ -461,6 +474,7 @@ window.__ModuleLoader__.load({
 		function showNotification(t, kind, sessionId, payload, config, facts) {
 			if (typeof Notification === 'undefined') return;
 			var copy = composeNotification(t, kind, payload, config, facts);
+			debugLog('notify:send', kind, sessionId, copy.title, copy.body);
 			var silent = isSilent(config, kind);
 			if (config.replaceBySession !== false) closeSession(sessionId);
 			try {
@@ -539,11 +553,26 @@ window.__ModuleLoader__.load({
 		 */
 		function notify(ctx, t, sessionId, kind, payload) {
 			try {
+				var foreground = isForeground();
+				debugLog('focus', foreground);
+				if (sessionId === undefined || sessionId === null) {
+					debugLog('notify:skip', kind, 'no-session');
+					return;
+				}
 				var config = readConfig(ctx);
-				if (!isTriggerEnabled(config, kind)) return;
-				if (isForeground()) return;
+				if (!isTriggerEnabled(config, kind)) {
+					debugLog('notify:skip', kind, 'disabled');
+					return;
+				}
+				if (foreground) {
+					debugLog('notify:skip', kind, 'foreground');
+					return;
+				}
 				var facts = sessionFacts(ctx, sessionId);
-				if (isSubagent(sessionId, facts)) return;
+				if (isSubagent(sessionId, facts)) {
+					debugLog('notify:skip', kind, 'subagent');
+					return;
+				}
 				showNotification(t, kind, sessionId, payload, config, facts);
 			} catch (error) {
 				console.warn('[dsh-notice] notification dispatch failed', error);
@@ -1091,10 +1120,22 @@ window.__ModuleLoader__.load({
 
 			ctx.effect(function () {
 				return ctx.remote.$on('user-questions/request', function (request, next) {
+					var sessionId;
+					var scopeFailure;
 					try {
-						var sessionId = ctx.sessions.scopeOf(this);
+						sessionId = ctx.sessions.scopeOf(this);
+					} catch (error) {
+						sessionId = undefined;
+						scopeFailure = 'THREW:' + String(error);
+					}
+					debugLog('waterfall', 'question', {
+						hasThis: this !== undefined && this !== null,
+						sessionId: scopeFailure !== undefined ? scopeFailure : sessionId,
+					});
+					try {
 						var count = request && Array.isArray(request.questions) ? request.questions.length : 0;
 						if (sessionId !== undefined) notify(ctx, t, sessionId, 'question', { count: count });
+						else debugLog('notify:skip', 'question', 'no-session');
 					} catch (error) {
 						console.warn('[dsh-notice] question handler failed', error);
 					}
@@ -1105,14 +1146,27 @@ window.__ModuleLoader__.load({
 
 			ctx.effect(function () {
 				return ctx.remote.$on('approval/request', function (request, next) {
+					var sessionId;
+					var scopeFailure;
 					try {
-						var sessionId = ctx.sessions.scopeOf(this);
+						sessionId = ctx.sessions.scopeOf(this);
+					} catch (error) {
+						sessionId = undefined;
+						scopeFailure = 'THREW:' + String(error);
+					}
+					debugLog('waterfall', 'approval', {
+						hasThis: this !== undefined && this !== null,
+						sessionId: scopeFailure !== undefined ? scopeFailure : sessionId,
+					});
+					try {
 						if (sessionId !== undefined) {
 							notify(ctx, t, sessionId, 'approval', {
 								toolName: request === undefined ? '' : request.toolName,
 								reason: request === undefined ? undefined : request.reason,
 								displayReason: request === undefined || request.displayReason === undefined ? undefined : (request.displayReason.en),
 							});
+						} else {
+							debugLog('notify:skip', 'approval', 'no-session');
 						}
 					} catch (error) {
 						console.warn('[dsh-notice] approval handler failed', error);
@@ -1168,6 +1222,13 @@ window.__ModuleLoader__.load({
 					runStartedAt.clear();
 				};
 			}, 'notice: live notifications');
+
+			debugLog('applied', {
+				inject: inject,
+				hasRemote: !!ctx.remote,
+				hasSessions: !!ctx.sessions,
+				hasConfigForms: !!ctx.configForms,
+			});
 		}
 		//#endregion
 
