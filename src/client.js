@@ -87,6 +87,7 @@ window.__ModuleLoader__.load({
 			'settings.permissionDefaultHint': '发送一次测试通知以触发系统授权。若没有出现，请在「系统设置 → 通知 → DeepSeek Harness」中允许通知。',
 			'settings.loading': '正在读取配置…',
 			'settings.unavailable': '当前部署没有提供可写的通知配置。',
+			'settings.renderFailed': '配置页渲染失败：{message}',
 			'settings.saveFailed': '保存失败，请重试。',
 			'settings.readOnly': '本部署的通知配置为只读。',
 			'settings.overridden': '已覆盖',
@@ -148,6 +149,7 @@ window.__ModuleLoader__.load({
 			'settings.permissionDefaultHint': 'Send a test notification to trigger the system prompt. If nothing appears, allow notifications in System Settings → Notifications → DeepSeek Harness.',
 			'settings.loading': 'Loading configuration…',
 			'settings.unavailable': 'This deployment exposes no writable notification configuration.',
+			'settings.renderFailed': 'Settings page render failed: {message}',
 			'settings.saveFailed': 'Save failed, please retry.',
 			'settings.readOnly': 'Notification configuration is read-only in this deployment.',
 			'settings.overridden': 'Overridden',
@@ -575,6 +577,8 @@ window.__ModuleLoader__.load({
 		var EMPTY_FORM_SNAPSHOT = { status: 'loading', value: undefined, writable: false, revision: undefined };
 		/** Snapshot used when the form cannot be read at all. */
 		var UNAVAILABLE_FORM_SNAPSHOT = { status: 'unavailable', value: undefined, writable: false, revision: undefined };
+		/** Snapshot used when reading the form throws. */
+		var FAILED_FORM_SNAPSHOT = { status: 'unavailable', value: undefined, writable: false, revision: undefined };
 		/** Strong references to test notifications so Electron keeps them visible. */
 		var testNotifications = new Set();
 		/** Inline styles keeping the page inside DSH's theme without a stylesheet. */
@@ -588,6 +592,7 @@ window.__ModuleLoader__.load({
 			hint: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', lineHeight: '18px' },
 			note: { color: 'var(--dsw-alias-label-tertiary)' },
 			error: { color: 'var(--dsw-alias-state-error-primary)' },
+			renderFailure: { color: 'var(--dsw-alias-state-error-primary)', fontSize: '13px', lineHeight: '20px' },
 			permissionValue: { flex: 'none', color: 'var(--dsw-alias-label-secondary)' },
 		};
 
@@ -703,32 +708,149 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * Detect which form contract the slot owner handed to the page.
+		 *
+		 * `plugins.row.config` passes its `ConfigPageForm` (`{ state, mutate }`):
+		 * the page owner refreshes `state` through new props, so there is nothing to
+		 * subscribe to. A full `ConfigForm` (subscribe/getSnapshot/set) is also
+		 * accepted for other embedding sites and as the plugin-level fallback.
+		 *
+		 * Property access is defensive: a future form may expose a throwing getter,
+		 * and that must degrade instead of blanking the page.
+		 *
+		 * @param form - the `props.form` value.
+		 * @returns which capabilities the value offers.
+		 */
+		function formShape(form) {
+			var shape = { state: false, store: false };
+			if (form === undefined || form === null || typeof form !== 'object') return shape;
+			try {
+				shape.state = form.state !== undefined && form.state !== null && typeof form.mutate === 'function';
+			} catch (error) {
+				shape.state = false;
+			}
+			if (shape.state) return shape;
+			try {
+				shape.store = typeof form.subscribe === 'function' && typeof form.getSnapshot === 'function';
+			} catch (error) {
+				shape.store = false;
+			}
+			return shape;
+		}
+
+		/** Read an owner-supplied ConfigPageForm snapshot defensively. */
+		function providedState(form) {
+			try {
+				var state = form === undefined || form === null ? undefined : form.state;
+				return state !== undefined && state !== null && typeof state === 'object' ? state : EMPTY_FORM_SNAPSHOT;
+			} catch (error) {
+				return FAILED_FORM_SNAPSHOT;
+			}
+		}
+
+		/** Read a full ConfigForm snapshot defensively. */
+		function storeState(form) {
+			try {
+				var state = form === undefined || form === null ? undefined : form.getSnapshot();
+				return state !== undefined && state !== null && typeof state === 'object' ? state : EMPTY_FORM_SNAPSHOT;
+			} catch (error) {
+				return FAILED_FORM_SNAPSHOT;
+			}
+		}
+
+		/** Human-readable text for an unexpected render failure. */
+		function failureMessage(error) {
+			try {
+				return error !== undefined && error !== null && error.message ? String(error.message) : String(error);
+			} catch (nested) {
+				return 'unknown error';
+			}
+		}
+
+		/** Visible last-resort copy instead of a blank page. */
+		function renderSettingsFailure(t, error) {
+			return h('div', { style: SETTINGS_STYLES.renderFailure }, t('settings.renderFailed', { message: failureMessage(error) }));
+		}
+
+		/** React.Component when available; without it the boundary degrades to a pass-through. */
+		var ReactComponentClass = typeof React.Component === 'function' ? React.Component : null;
+
+		/** Error boundary around the page body: a render throw must show text, never a blank slot. */
+		function SettingsErrorBoundary(props) {
+			if (ReactComponentClass !== null) ReactComponentClass.call(this, props);
+			this.props = props;
+			this.state = { error: null };
+		}
+		if (ReactComponentClass !== null) {
+			SettingsErrorBoundary.prototype = Object.create(ReactComponentClass.prototype);
+			SettingsErrorBoundary.prototype.constructor = SettingsErrorBoundary;
+		}
+		SettingsErrorBoundary.getDerivedStateFromError = function (error) {
+			return { error: error };
+		};
+		SettingsErrorBoundary.prototype.render = function () {
+			var error = this.state === undefined || this.state === null ? null : this.state.error;
+			if (error !== null && error !== undefined) {
+				var boundaryT = this.props !== undefined && typeof this.props.t === 'function' ? this.props.t : identityTranslate;
+				return renderSettingsFailure(boundaryT, error);
+			}
+			return this.props === undefined ? null : this.props.children;
+		};
+
+		/**
 		 * The row configuration page registered into `plugins.row.config`.
 		 *
-		 * Writes are single-field mutations against the live config form: every
-		 * field is volatile, so a save is visible immediately and no staged form
-		 * frame is needed. Optimistic local values keep the control responsive
-		 * while the Host round-trip settles.
+		 * The slot owner hands over its `ConfigPageForm` (`{ state, mutate }`) and
+		 * re-renders this page with a fresh snapshot on every change, so the body
+		 * never subscribes in that mode. A full `ConfigForm` and the plugin-captured
+		 * `ctx.configForms.get('notice')` are also supported.
 		 *
-		 * @param props - `view`, the plugin-manager supplied `form`, and the slot's `t`.
+		 * @param props - `view`, the slot's `form`, the locale `t`, and the fallback form.
 		 * @returns the summary line or the configuration page.
 		 */
 		function NoticeSettingsPage(props) {
 			var t = typeof props.t === 'function' ? props.t : identityTranslate;
+			return h(SettingsErrorBoundary, { t: t }, h(NoticeSettingsBody, props));
+		}
+
+		/**
+		 * The page body. All hooks run unconditionally; every form read is guarded
+		 * so a wrong contract renders the loading/unavailable note instead of
+		 * throwing out of the slot.
+		 *
+		 * @param props - the slot props (see {@link NoticeSettingsPage}).
+		 * @returns the summary line or the configuration page.
+		 */
+		function NoticeSettingsBody(props) {
+			var t = typeof props.t === 'function' ? props.t : identityTranslate;
 			var form = props.form;
+			var primaryShape = formShape(form);
+			var fallbackForm = props.fallbackForm;
+			var fallbackShape = formShape(fallbackForm);
+
+			var usesState = primaryShape.state;
+			var anchorForm;
+			if (usesState || primaryShape.store) anchorForm = form;
+			else if (fallbackShape.state || fallbackShape.store) anchorForm = fallbackForm;
+			var anchorShape = anchorForm === form ? primaryShape : fallbackShape;
+			var hasForm = usesState || anchorShape.state || anchorShape.store;
+
 			var subscribe = React.useCallback(function (listener) {
-				if (form === undefined || form === null) return function () {};
-				return form.subscribe(listener);
-			}, [form]);
-			var getSnapshot = React.useCallback(function () {
-				if (form === undefined || form === null) return EMPTY_FORM_SNAPSHOT;
+				if (!anchorShape.store || anchorForm === undefined || anchorForm === null) return function () {};
 				try {
-					return form.getSnapshot();
+					return anchorForm.subscribe(listener);
 				} catch (error) {
-					return UNAVAILABLE_FORM_SNAPSHOT;
+					return function () {};
 				}
-			}, [form]);
-			var snapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+			}, [anchorForm, anchorShape.store]);
+			var getSnapshot = React.useCallback(function () {
+				// In props-state mode the owner re-renders us; the store snapshot is unused.
+				if (usesState) return EMPTY_FORM_SNAPSHOT;
+				if (!anchorShape.store || anchorForm === undefined || anchorForm === null) return EMPTY_FORM_SNAPSHOT;
+				return storeState(anchorForm);
+			}, [usesState, anchorForm, anchorShape.store]);
+			var storeSnapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
 			var pendingState = React.useState({});
 			var pending = pendingState[0];
 			var setPending = pendingState[1];
@@ -752,7 +874,13 @@ window.__ModuleLoader__.load({
 				};
 			}, [setPermission]);
 
-			if (form === undefined || form === null || snapshot.status === 'loading') {
+			var snapshot;
+			if (usesState) snapshot = providedState(form);
+			else if (anchorShape.state) snapshot = providedState(anchorForm);
+			else snapshot = storeSnapshot;
+			if (snapshot === undefined || snapshot === null || typeof snapshot !== 'object') snapshot = EMPTY_FORM_SNAPSHOT;
+
+			if (!hasForm || snapshot.status === 'loading') {
 				return h('div', { style: SETTINGS_STYLES.note }, t('settings.loading'));
 			}
 			if (snapshot.status === 'unavailable') {
@@ -772,6 +900,11 @@ window.__ModuleLoader__.load({
 				});
 			}
 
+			/**
+			 * Write one field through whichever contract the page received.
+			 * ConfigPageForm owns the revision fence, so its mutate gets one op
+			 * and no expectedRevision.
+			 */
 			function commit(field, value) {
 				setPending(function (previous) {
 					var next = {};
@@ -781,13 +914,23 @@ window.__ModuleLoader__.load({
 				});
 				setTestFailed(false);
 				try {
-					var settlement = form.set(field, value);
-					if (settlement && typeof settlement.then === 'function') {
+					var settlement;
+					var owner = usesState ? form : (anchorShape.state ? anchorForm : undefined);
+					if (owner !== undefined && owner !== null && typeof owner.mutate === 'function') {
+						settlement = owner.mutate([{ op: 'set', path: [field], value: value }]);
+					} else if (anchorShape.store && anchorForm !== undefined && anchorForm !== null && typeof anchorForm.set === 'function') {
+						settlement = anchorForm.set(field, value);
+					} else if (anchorShape.store && anchorForm !== undefined && anchorForm !== null && typeof anchorForm.mutate === 'function') {
+						settlement = anchorForm.mutate([{ op: 'set', path: [field], value: value }]);
+					}
+					if (settlement !== undefined && settlement !== null && typeof settlement.then === 'function') {
 						settlement.then(function (accepted) {
 							if (accepted === false) dropPending(field);
 						}).catch(function () {
 							dropPending(field);
 						});
+					} else if (settlement === false) {
+						dropPending(field);
 					}
 				} catch (error) {
 					dropPending(field);
@@ -805,12 +948,8 @@ window.__ModuleLoader__.load({
 
 			function onTest() {
 				var result = sendTestNotification(t);
-				setPermFromNotification();
-				setTestFailed(!result.ok);
-			}
-
-			function setPermFromNotification() {
 				setPermission(readNotificationPermission());
+				setTestFailed(!result.ok);
 			}
 
 			var hintKey = permissionHintKey(permission);
@@ -983,12 +1122,33 @@ window.__ModuleLoader__.load({
 				});
 			}, 'notice: approval/request');
 
+			// Fallback form for embedding sites that do not hand one over: the full
+			// ConfigForm captured once here. A failed or not-yet-served lookup stays
+			// undefined and the page renders its loading note instead of crashing.
+			var fallbackConfigForm;
+			try {
+				fallbackConfigForm = ctx.configForms.get(ENTRY_ID);
+			} catch (error) {
+				fallbackConfigForm = undefined;
+			}
+
 			ctx.effect(function () {
 				return ctx.slots.inject('plugins.row.config', function () {
 					return ctx.slots.register({
 						name: 'plugins.row.config',
 						key: SETTINGS_ROW_KEY,
 						locale: NS,
+						inject: function () {
+							var fallback = fallbackConfigForm;
+							if (fallback === undefined || fallback === null) {
+								try {
+									fallback = ctx.configForms.get(ENTRY_ID);
+								} catch (error) {
+									fallback = undefined;
+								}
+							}
+							return { fallbackForm: fallback };
+						},
 					}, NoticeSettingsPage);
 				});
 			}, 'notice: settings page');

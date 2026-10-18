@@ -44,7 +44,11 @@ export function makeReactStub() {
         else if (value !== null && value !== undefined && value !== false) flat.push(value)
       }
       push(children)
-      return { type, props: props || {}, children: flat }
+      const elementProps = props || {}
+      // Match React's element props: children ride on props as well as the tree.
+      if (flat.length === 1) elementProps.children = flat[0]
+      else if (flat.length > 1) elementProps.children = flat
+      return { type, props: elementProps, children: flat }
     },
     useCallback(fn) {
       return fn
@@ -163,7 +167,8 @@ export function createHarness(options = {}) {
   const disposers = []
   const formSubscribers = new Set()
   const formSetCalls = []
-  const registration = { options: undefined, component: undefined }
+  const registration = { options: undefined, component: undefined, injectFace: {} }
+  const configFormAvailable = options.configFormsAvailable !== false
 
   const form = {
     getSnapshot() {
@@ -226,6 +231,7 @@ export function createHarness(options = {}) {
     },
     configForms: {
       get() {
+        if (!configFormAvailable) throw new Error('config form is not served in this fixture')
         return form
       },
     },
@@ -238,9 +244,18 @@ export function createHarness(options = {}) {
       register(slotOptions, component) {
         registration.options = slotOptions
         registration.component = component
+        registration.injectFace = {}
+        if (typeof slotOptions.inject === 'function') {
+          try {
+            registration.injectFace = slotOptions.inject() || {}
+          } catch (error) {
+            registration.injectFace = {}
+          }
+        }
         return () => {
           registration.options = undefined
           registration.component = undefined
+          registration.injectFace = {}
         }
       },
     },
@@ -319,7 +334,13 @@ export function createHarness(options = {}) {
   }
 }
 
-/** Flatten a fake React tree into its nodes and text. */
+/**
+ * Flatten a fake React tree into its nodes and text.
+ *
+ * Function components (the page body) and class components (the error boundary)
+ * are invoked here, because this React stub does not have a renderer: rendering
+ * a component is what the real renderer would do.
+ */
 export function flattenTree(node, out = []) {
   if (node === null || node === undefined) return out
   if (typeof node === 'string') {
@@ -328,6 +349,29 @@ export function flattenTree(node, out = []) {
   }
   if (Array.isArray(node)) {
     node.forEach((child) => flattenTree(child, out))
+    return out
+  }
+  if (typeof node.type === 'function') {
+    const component = node.type
+    if (component.prototype && typeof component.prototype.render === 'function') {
+      const instance = new component(node.props)
+      if (typeof component.getDerivedStateFromError === 'function') {
+        // Mirror React: render the subtree, and render the boundary's fallback
+        // state when a descendant throws.
+        try {
+          flattenTree(instance.render(), out)
+          return out
+        } catch (error) {
+          instance.state = component.getDerivedStateFromError(error)
+          flattenTree(instance.render(), out)
+          return out
+        }
+      }
+      flattenTree(instance.render(), out)
+      return out
+    }
+    // Function components throw like real React does; a boundary above catches it.
+    flattenTree(component(node.props), out)
     return out
   }
   out.push(node)
