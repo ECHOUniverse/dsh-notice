@@ -4,17 +4,24 @@ DeepSeek Harness 桌面版的 macOS 系统通知插件：agent **完成**、**�
 
 ## 安装
 
+桌面版必须用 **App 自带的 CLI**（版本与应用一致；全局 npm 的 `dsh` 可能更旧）：
+
 ```bash
-dsh plugin --profile desktop add link:/Volumes/WD-1T/00_Workspace/00_Active/CodeProject/dsh-notice
+"/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" \
+  plugin --profile desktop add link:/Volumes/WD-1T/00_Workspace/00_Active/CodeProject/dsh-notice
 ```
 
 或从 npm 安装：
 
 ```bash
-dsh plugin --profile desktop add @hanxu131/dsh-notice
+"/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" \
+  plugin --profile desktop add @hanxu131/dsh-notice
 ```
 
 安装后需要**完全退出并重启 DeepSeek Harness**（仅关闭窗口不够），插件才会加载。重启后打开「插件」页，在 `@hanxu131/dsh-notice` 的 `notice` 行点「配置」即可打开设置页。
+
+> 安装/更新插件后，重启前 App 里不会出现该插件。若只想确认识别结果，可用
+> `dsh --profile desktop --dump-config | grep dsh-notice` 查看合成后的配置层。
 
 ## 配置项
 
@@ -47,9 +54,23 @@ dsh plugin --profile desktop add @hanxu131/dsh-notice
 ## 已知限制
 
 - **App 关闭后没有通知**：通知只在渲染进程里发；桌面 App 完全退出、或 Web UI 没打开时，不会有任何通知。
-- **首条通知可能被系统吞掉**：macOS 的通知授权是系统级状态，与浏览器侧的 `Notification.permission` 不是一回事。授权尚未决定时，第一条通知会被静默丢弃；用设置页的「发送测试通知」确认一次即可。
+- **首条通知可能被系统吞掉**：macOS 的通知授权是系统级状态，与浏览器侧的 `Notification.permission` 不是一回事。授权尚未决定时，第一条通知会被静默丢弃；用设置页的「发送测试通知」确认一次即可。系统授权被拒后通知会被静默丢弃，而 `Notification.permission` 仍显示 `granted`。
+- **依赖桌面 App 的安全上下文**：通知由 Electron 渲染进程以 DeepSeek Harness 的 bundle 身份投递；在普通浏览器里跑 `dsh web` 时，发送者会变成浏览器自己，而不是 DeepSeek Harness。
 - **没有服务端兜底通道**：这是 [ADR 0001](docs/adr/0001-notification-channel.md) 的明确取舍——只保证身份正确、可点击、可前台抑制，不保证 App 退出后的送达。
+- **点击通知只把窗口带到前台**：跳转到具体会话是 M2 的范围，本期只保留 `sessionId` 供后续实现。
 - 需要 DSH `>=0.2.1-rc.1 <0.3.0-0`。
+
+## 真机验收清单
+
+1. 重启 App 后，「插件」页能看到 `@hanxu131/dsh-notice`，且 bundle 没有激活失败。
+2. `notice` 行的「配置」页可见 8 个字段、测试按钮与权限状态行。
+3. 改任一字段 → `~/.dsh/profiles/desktop/cordis.patch.yml` 落盘，且不重启即时生效。
+4. 点「发送测试通知」→ 出现发送者为 DeepSeek Harness 的横幅。
+5. 窗口失焦时跑一个 >10s 的任务 → 收到「已完成」通知；窗口聚焦时同样任务 → 不收到。
+6. `ask_user_question` 的询问 → 收到通知，问题卡片仍可正常回答。
+7. 触发一次权限审批 → 收到通知，审批流程正常。
+8. 制造一次运行失败 → 收到错误通知。
+9. 同一会话连续两次通知 → 通知中心只保留最新一条。
 
 ## 开发
 
