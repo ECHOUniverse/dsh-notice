@@ -365,20 +365,25 @@ window.__ModuleLoader__.load({
 		/**
 		 * Compose title and body for one notification.
 		 *
+		 * The title comes from the `title` session projection: the list summary's
+		 * role is navigation metadata (`displayTitle`), while the durable title is
+		 * projected separately. The project segment in the body still uses the
+		 * summary's cwd basename.
+		 *
 		 * @param t - translate function.
 		 * @param kind - trigger kind.
 		 * @param payload - event-specific facts.
 		 * @param config - resolved configuration.
-		 * @param summary - session summary, when the catalog has one.
+		 * @param facts - session summary and projection title for the event's session.
 		 * @returns title and body.
 		 */
-		function composeNotification(t, kind, payload, config, summary) {
-			var project = summary === undefined ? '' : basename(summary.cwd);
+		function composeNotification(t, kind, payload, config, facts) {
+			var project = facts.summary === undefined ? '' : basename(facts.summary.cwd);
 			var title;
 			if (config.showSessionTitle === false) {
 				title = t('app.name');
 			} else {
-				title = (summary && typeof summary.title === 'string' && summary.title.trim() !== '') ? summary.title : (project || t('app.name'));
+				title = facts.title || project || t('app.name');
 			}
 			var composed = composeSentence(t, kind, payload, config);
 			var body = project === '' ? composed.text : composed.text + ' · ' + project;
@@ -449,11 +454,11 @@ window.__ModuleLoader__.load({
 		 * @param sessionId - session the notification belongs to.
 		 * @param payload - event-specific facts.
 		 * @param config - resolved configuration.
-		 * @param summary - session summary, when known.
+		 * @param facts - session summary and projection title for the session.
 		 */
-		function showNotification(t, kind, sessionId, payload, config, summary) {
+		function showNotification(t, kind, sessionId, payload, config, facts) {
 			if (typeof Notification === 'undefined') return;
-			var copy = composeNotification(t, kind, payload, config, summary);
+			var copy = composeNotification(t, kind, payload, config, facts);
 			var silent = isSilent(config, kind);
 			if (config.replaceBySession !== false) closeSession(sessionId);
 			try {
@@ -480,32 +485,45 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * Read the catalog summary for one session, if the list has it.
+		 * Read the live session facts notification copy needs: the catalog summary
+		 * (cwd and origin) plus the durable title projected for this session.
+		 *
+		 * `SessionListState.projectionsBySession[id].values.title` is the projection
+		 * declared by `@deepseek-ai/dsh-session-title`; a null, empty, or whitespace
+		 * title is treated as absent so the title chain can fall back.
 		 *
 		 * @param ctx - client plugin context.
 		 * @param sessionId - session identity.
-		 * @returns the summary, or undefined.
+		 * @returns the summary (possibly undefined) and the title (possibly undefined).
 		 */
-		function sessionSummary(ctx, sessionId) {
+		function sessionFacts(ctx, sessionId) {
+			var facts = { summary: undefined, title: undefined };
 			try {
 				var state = ctx.sessions.list.getSnapshot();
-				return state && state.byId ? state.byId[sessionId] : undefined;
+				if (state !== undefined && state !== null && state.byId !== undefined) {
+					facts.summary = state.byId[sessionId];
+				}
+				var projections = state === undefined || state === null ? undefined : state.projectionsBySession;
+				var projection = projections === undefined || projections === null ? undefined : projections[sessionId];
+				var values = projection === undefined || projection === null ? undefined : projection.values;
+				var projected = values === undefined || values === null ? undefined : values.title;
+				if (typeof projected === 'string' && projected.trim() !== '') facts.title = projected.trim();
 			} catch (error) {
-				return undefined;
+				// A missing or mid-update catalog degrades to app-name copy.
 			}
+			return facts;
 		}
 
 		/**
 		 * Whether this session is a subagent child; subagents never notify.
 		 *
-		 * @param ctx - client plugin context.
 		 * @param sessionId - session identity.
+		 * @param facts - session facts read for this event.
 		 * @returns true for subagent sessions.
 		 */
-		function isSubagent(ctx, sessionId) {
+		function isSubagent(sessionId, facts) {
 			if (subagentSessions.has(sessionId)) return true;
-			var summary = sessionSummary(ctx, sessionId);
-			return summary !== undefined && summary.origin === 'subagent';
+			return facts.summary !== undefined && facts.summary.origin === 'subagent';
 		}
 
 		/**
@@ -522,8 +540,9 @@ window.__ModuleLoader__.load({
 				var config = readConfig(ctx);
 				if (!isTriggerEnabled(config, kind)) return;
 				if (isForeground()) return;
-				if (isSubagent(ctx, sessionId)) return;
-				showNotification(t, kind, sessionId, payload, config, sessionSummary(ctx, sessionId));
+				var facts = sessionFacts(ctx, sessionId);
+				if (isSubagent(sessionId, facts)) return;
+				showNotification(t, kind, sessionId, payload, config, facts);
 			} catch (error) {
 				console.warn('[dsh-notice] notification dispatch failed', error);
 			}
@@ -912,8 +931,11 @@ window.__ModuleLoader__.load({
 				return ctx.remote.$on('api-session/added', function (summary) {
 					try {
 						if (summary === undefined || summary === null) return;
-						if (summary.origin === 'subagent') subagentSessions.add(summary.id);
-						else subagentSessions.delete(summary.id);
+						// `api-session/added` forwards the Host wire summary, whose identity
+						// field is `sessionId` (the client list row later mirrors it as `id`).
+						if (summary.sessionId === undefined || summary.sessionId === null) return;
+						if (summary.origin === 'subagent') subagentSessions.add(summary.sessionId);
+						else subagentSessions.delete(summary.sessionId);
 					} catch (error) {
 						// Catalog bookkeeping is best-effort.
 					}

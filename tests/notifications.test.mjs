@@ -7,16 +7,19 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createHarness, session } from './helpers/client-harness.mjs'
+import { createHarness, session, wireSession } from './helpers/client-harness.mjs'
 
 test('final completion notifies with elapsed time and project basename', () => {
-  const h = createHarness({ summaries: { s1: session('s1') } })
+  const h = createHarness({
+    summaries: { s1: session('s1') },
+    projections: { s1: { values: { title: 'Fix the build' } } },
+  })
   h.emit('api-session/status', 's1', true)
   h.setNow(1_005_000)
   h.emit('api-session/status', 's1', false)
 
   const [notification] = h.notifications()
-  assert.equal(notification.title, 'Session s1')
+  assert.equal(notification.title, 'Fix the build')
   assert.equal(notification.options.body, '已完成 · 5 秒 · project-s1')
   assert.equal(notification.options.silent, true, 'smart policy silences completion')
 })
@@ -122,10 +125,16 @@ test('subagent sessions never notify, even before the catalog lists them', () =>
   filtered.emit('api-session/error', 'sub', 'boom')
   assert.equal(filtered.notifications().length, 0, 'catalog origin filters subagents')
 
+  // `api-session/added` forwards the Host wire summary: identity is sessionId.
   const added = createHarness({ summaries: {} })
-  added.emit('api-session/added', session('late', { origin: 'subagent' }))
+  added.emit('api-session/added', wireSession('late', { origin: 'subagent' }))
   added.emit('api-session/error', 'late', 'boom')
   assert.equal(added.notifications().length, 0, 'api-session/added teaches the filter')
+
+  // Re-adding the same id as an ordinary session clears the cached filter.
+  added.emit('api-session/added', wireSession('late'))
+  added.emit('api-session/error', 'late', 'boom')
+  assert.equal(added.notifications().length, 1, 'the else branch removes the id from the filter')
 })
 
 test('per-session replacement closes the previous notification', () => {
@@ -219,18 +228,42 @@ test('cwd basename handles nested, trailing-slash, and Windows paths', () => {
   }
 })
 
-test('session title and app-name fallbacks match showSessionTitle', () => {
-  const titled = createHarness({ summaries: { s18: session('s18', { title: 'Fix the build' }) } })
+test('notification title comes from the title projection, then cwd, then the app name', () => {
+  const titled = createHarness({
+    summaries: { s18: session('s18') },
+    projections: { s18: { values: { title: 'Fix the build' } } },
+  })
   titled.emit('api-session/error', 's18', 'boom')
   assert.equal(titled.notifications()[0].title, 'Fix the build')
 
-  const untitled = createHarness({ summaries: { s18: session('s18', { title: undefined }) } })
+  const untitled = createHarness({ summaries: { s18: session('s18') } })
   untitled.emit('api-session/error', 's18', 'boom')
-  assert.equal(untitled.notifications()[0].title, 'project-s18', 'falls back to the project basename')
+  assert.equal(untitled.notifications()[0].title, 'project-s18', 'falls back to the cwd basename')
 
-  const hidden = createHarness({ summaries: { s18: session('s18', { title: 'Fix the build' }) }, value: { showSessionTitle: false } })
+  const blankProjection = createHarness({
+    summaries: { s18: session('s18') },
+    projections: { s18: { values: { title: '   ' } } },
+  })
+  blankProjection.emit('api-session/error', 's18', 'boom')
+  assert.equal(blankProjection.notifications()[0].title, 'project-s18', 'a whitespace title is absent')
+
+  const bare = createHarness({ summaries: { s18: session('s18', { cwd: undefined }) } })
+  bare.emit('api-session/error', 's18', 'boom')
+  assert.equal(bare.notifications()[0].title, 'DeepSeek Harness', 'no title and no cwd')
+
+  const hidden = createHarness({
+    summaries: { s18: session('s18') },
+    projections: { s18: { values: { title: 'Fix the build' } } },
+    value: { showSessionTitle: false },
+  })
   hidden.emit('api-session/error', 's18', 'boom')
   assert.equal(hidden.notifications()[0].title, 'DeepSeek Harness')
+})
+
+test('a projection title works before the session list carries a row', () => {
+  const h = createHarness({ projections: { ghost: { values: { title: 'Background work' } } } })
+  h.emit('api-session/error', 'ghost', 'boom')
+  assert.equal(h.notifications()[0].title, 'Background work')
 })
 
 test('English locale renders English copy', () => {

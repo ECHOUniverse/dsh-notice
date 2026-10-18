@@ -155,7 +155,7 @@ export function createHarness(options = {}) {
     status: options.status || 'ready',
     writable: options.writable !== false,
     summaries: { ...(options.summaries || {}) },
-    addedSummaries: [],
+    projections: { ...(options.projections || {}) },
     lang: options.locale || 'zh',
   }
   const handlers = new Map()
@@ -212,7 +212,12 @@ export function createHarness(options = {}) {
     sessions: {
       list: {
         getSnapshot() {
-          return { ids: Object.keys(state.summaries), byId: state.summaries }
+          return {
+            ids: Object.keys(state.summaries),
+            byId: state.summaries,
+            phase: 'ready',
+            projectionsBySession: state.projections,
+          }
         },
       },
       scopeOf(subject) {
@@ -282,6 +287,13 @@ export function createHarness(options = {}) {
     setSummaries(next) {
       state.summaries = { ...next }
     },
+    setProjections(next) {
+      state.projections = { ...next }
+    },
+    /** Set the durable title projection for one session. */
+    setProjectionTitle(sessionId, title) {
+      state.projections = { ...state.projections, [sessionId]: { values: { title } } }
+    },
     setNow(value) {
       loaded.sandbox.__now = value
     },
@@ -323,14 +335,31 @@ export function flattenTree(node, out = []) {
   return out
 }
 
-/** Session summary fixture. */
+/**
+ * Client list-row fixture (`SessionListState.byId` shape: identity field `id`).
+ *
+ * The optional `title` mirrors what the client controller may derive from the
+ * projection; the bundle under test must read the projection itself, so copy
+ * tests set `projections` explicitly.
+ */
 export function session(id, extra = {}) {
   return {
     id,
-    title: 'Session ' + id,
     displayTitle: 'Session ' + id,
     cwd: '/tmp/project-' + id,
     running: false,
+    ...extra,
+  }
+}
+
+/** Host wire summary fixture for `api-session/added` (identity field `sessionId`). */
+export function wireSession(id, extra = {}) {
+  return {
+    sessionId: id,
+    agentAvailable: true,
+    running: false,
+    blank: false,
+    updatedAt: 0,
     ...extra,
   }
 }
