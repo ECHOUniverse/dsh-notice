@@ -1,0 +1,9 @@
+node_modules/
+lib/
+*.tgz
+.DS_Store
+.pnpm-store/
+.env
+*.log
+package-lock.json
+.tmp/

@@ -1,0 +1,20 @@
+# @hanxu131/dsh-notice bundle patch: mounts the notice row into a dsh profile
+# composition. The host half declares the volatile configuration schema; the
+# client half (lib/client.js) delivers macOS notifications and renders the
+# row's configuration page.
+#
+# Install: `dsh plugin --profile <name> add @hanxu131/dsh-notice`
+# Local:   `dsh plugin --profile <name> add link:/path/to/dsh-notice`
+- insert:
+    - id: notice
+      # Quoted because `@` is a reserved YAML indicator.
+      name: '@hanxu131/dsh-notice'
+      config:
+        notifyOnComplete: true
+        notifyOnQuestion: true
+        notifyOnApproval: true
+        notifyOnError: true
+        soundPolicy: smart
+        redact: true
+        showSessionTitle: true
+        replaceBySession: true
