@@ -325,6 +325,9 @@ window.__ModuleLoader__.load({
 		 * @returns the detail, or the empty string.
 		 */
 		function detailLine(text) {
+			if (text !== null && typeof text === 'object') {
+				text = typeof text.en === 'string' ? text.en : (typeof text.zh === 'string' ? text.zh : '');
+			}
 			var collapsed = collapse(text);
 			return collapsed === '' ? '' : truncate(collapsed, DETAIL_LIMIT);
 		}
@@ -416,6 +419,8 @@ window.__ModuleLoader__.load({
 		var lastClickedSessionId;
 		/** Sessions observed as subagent children, for filtering before the catalog catches up. */
 		var subagentSessions = new Set();
+		/** Last pending-interaction key already announced, per session (dedupe across status snapshots). */
+		var announcedPending = new Map();
 		/** Start time of the current run per session, for completion durations. */
 		var runStartedAt = new Map();
 
@@ -1053,8 +1058,8 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		//#region triggers
-		/** Required services: forwarded events, session catalog, config forms, copy, slots. */
-		var inject = ['remote', 'sessions', 'configForms', 'locale', 'slots'];
+		/** Required services: forwarded events, session status, catalog, config forms, copy, slots. */
+		var inject = ['remote', 'sessions', 'configForms', 'locale', 'slots', 'uiSession'];
 
 		/**
 		 * Mount the browser half: dictionaries, event subscriptions, and the row's
@@ -1118,63 +1123,80 @@ window.__ModuleLoader__.load({
 				});
 			}, 'notice: api-session/removed');
 
+			/**
+			 * Observe the Session UI status source for pending interactions. The
+			 * official approval/question plugins claim their waterfalls before this
+			 * row ever runs, but they publish the claimed interaction into
+			 * `ctx.uiSession.sessionStatus`, which is order-independent.
+			 */
 			ctx.effect(function () {
-				return ctx.remote.$on('user-questions/request', function (request, next) {
-					var sessionId;
-					var scopeFailure;
-					try {
-						sessionId = ctx.sessions.scopeOf(this);
-					} catch (error) {
-						sessionId = undefined;
-						scopeFailure = 'THREW:' + String(error);
-					}
-					debugLog('waterfall', 'question', {
-						hasThis: this !== undefined && this !== null,
-						sessionId: scopeFailure !== undefined ? scopeFailure : sessionId,
-					});
-					try {
-						var count = request && Array.isArray(request.questions) ? request.questions.length : 0;
-						if (sessionId !== undefined) notify(ctx, t, sessionId, 'question', { count: count });
-						else debugLog('notify:skip', 'question', 'no-session');
-					} catch (error) {
-						console.warn('[dsh-notice] question handler failed', error);
-					}
-					// Listen only: the question card's waterfall must proceed untouched.
-					return next();
-				});
-			}, 'notice: user-questions/request');
+				var source = ctx.uiSession === undefined || ctx.uiSession === null ? undefined : ctx.uiSession.sessionStatus;
+				if (source === undefined || source === null || typeof source.getSnapshot !== 'function' || typeof source.subscribe !== 'function') {
+					debugLog('pending:unavailable');
+					return function () {};
+				}
 
-			ctx.effect(function () {
-				return ctx.remote.$on('approval/request', function (request, next) {
-					var sessionId;
-					var scopeFailure;
+				/** Collect the highest-precedence pending interaction per session. */
+				function interactionMap(snapshot) {
+					var current = new Map();
+					if (snapshot === undefined || snapshot === null || typeof snapshot.forEach !== 'function') return current;
 					try {
-						sessionId = ctx.sessions.scopeOf(this);
+						snapshot.forEach(function (status, sessionId) {
+							var interaction = status === undefined || status === null ? undefined : status.pendingInteraction;
+							if (interaction !== undefined && interaction !== null && interaction.key !== undefined && interaction.key !== null) current.set(sessionId, interaction);
+						});
 					} catch (error) {
-						sessionId = undefined;
-						scopeFailure = 'THREW:' + String(error);
+						console.warn('[dsh-notice] pending interaction scan failed', error);
 					}
-					debugLog('waterfall', 'approval', {
-						hasThis: this !== undefined && this !== null,
-						sessionId: scopeFailure !== undefined ? scopeFailure : sessionId,
-					});
+					return current;
+				}
+
+				/** Announce new interactions and forget interactions that settled. */
+				function reconcile(snapshot) {
 					try {
-						if (sessionId !== undefined) {
-							notify(ctx, t, sessionId, 'approval', {
-								toolName: request === undefined ? '' : request.toolName,
-								reason: request === undefined ? undefined : request.reason,
-								displayReason: request === undefined || request.displayReason === undefined ? undefined : (request.displayReason.en),
-							});
-						} else {
-							debugLog('notify:skip', 'approval', 'no-session');
+						var current = interactionMap(snapshot);
+						var cleared = [];
+						announcedPending.forEach(function (key, sessionId) {
+							var interaction = current.get(sessionId);
+							if (interaction === undefined || interaction.key !== key) cleared.push(sessionId);
+						});
+						for (var index = 0; index < cleared.length; index += 1) {
+							announcedPending.delete(cleared[index]);
+							debugLog('pending:cleared', cleared[index]);
 						}
+						current.forEach(function (interaction, sessionId) {
+							if (announcedPending.get(sessionId) === interaction.key) return;
+							announcedPending.set(sessionId, interaction.key);
+							debugLog('pending', interaction.kind, sessionId, interaction.key);
+							if (interaction.kind === 'approval') {
+								notify(ctx, t, sessionId, 'approval', {
+									toolName: interaction.toolName,
+									reason: interaction.reason,
+									displayReason: interaction.displayReason,
+								});
+								return;
+							}
+							if (interaction.kind === 'question' || interaction.kind === 'plan-review') {
+								notify(ctx, t, sessionId, 'question', {
+									count: Array.isArray(interaction.questions) ? interaction.questions.length : 1,
+								});
+								return;
+							}
+							debugLog('pending:ignored', interaction.kind, sessionId);
+						});
 					} catch (error) {
-						console.warn('[dsh-notice] approval handler failed', error);
+						console.warn('[dsh-notice] pending interaction handler failed', error);
 					}
-					// Listen only: approval keeps its own waterfall.
-					return next();
+				}
+
+				// Announce interactions already pending when this bundle mounts (for
+				// example after a page refresh), then follow every status change.
+				reconcile(source.getSnapshot());
+				var unsubscribe = source.subscribe(function () {
+					reconcile(source.getSnapshot());
 				});
-			}, 'notice: approval/request');
+				return typeof unsubscribe === 'function' ? unsubscribe : function () {};
+			}, 'notice: pending interactions');
 
 			// Fallback form for embedding sites that do not hand one over: the full
 			// ConfigForm captured once here. A failed or not-yet-served lookup stays
@@ -1220,6 +1242,7 @@ window.__ModuleLoader__.load({
 					testNotifications.clear();
 					subagentSessions.clear();
 					runStartedAt.clear();
+					announcedPending.clear();
 				};
 			}, 'notice: live notifications');
 
@@ -1228,6 +1251,7 @@ window.__ModuleLoader__.load({
 				hasRemote: !!ctx.remote,
 				hasSessions: !!ctx.sessions,
 				hasConfigForms: !!ctx.configForms,
+				hasUiSession: !!ctx.uiSession,
 			});
 		}
 		//#endregion

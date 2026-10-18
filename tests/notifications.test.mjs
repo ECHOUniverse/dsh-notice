@@ -9,6 +9,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHarness, session, wireSession } from './helpers/client-harness.mjs'
 
+test('the claimed waterfalls are not subscribed at all', () => {
+  const h = createHarness()
+  assert.deepEqual(
+    h.remoteEvents().filter((event) => event === 'user-questions/request' || event === 'approval/request'),
+    [],
+    'official claimers own those waterfalls; this plugin must stay off them',
+  )
+})
+
 test('final completion notifies with elapsed time and project basename', () => {
   const h = createHarness({
     summaries: { s1: session('s1') },
@@ -32,34 +41,22 @@ test('completion without an observed start omits the duration but still notifies
   assert.equal(notification.options.body, '已完成 · project-s2')
 })
 
-test('question waterfall observes and always returns next()', () => {
+test('a pending question interaction notifies with its question count', () => {
   const h = createHarness({ summaries: { s3: session('s3') } })
-  let nextCalls = 0
-  const result = h.waterfall('user-questions/request', { __sessionId: 's3' }, { questions: [{}, {}] }, () => {
-    nextCalls += 1
-    return Promise.resolve('the existing answerer wins')
-  })
-
-  assert.ok(result instanceof Promise, 'the waterfall result is returned to the Host')
-  assert.equal(nextCalls, 1, 'the next() delegate ran exactly once')
+  h.upsertPending('s3', { sessionId: 's3', kind: 'question', key: 'question:s3:1', questions: [{}, {}] })
   assert.equal(h.notifications()[0].options.body, '等待你回答 2 个问题 · project-s3')
 })
 
 test('question count singular uses the singular copy', () => {
   const h = createHarness({ summaries: { s3: session('s3') } })
-  h.waterfall('user-questions/request', { __sessionId: 's3' }, { questions: [{}] }, () => Promise.resolve())
+  h.upsertPending('s3', { sessionId: 's3', kind: 'question', key: 'question:s3:1', questions: [{}] })
   assert.match(h.notifications()[0].options.body, /^等待你回答 1 个问题/)
 })
 
-test('approval waterfall observes and always returns next()', () => {
+test('a pending approval interaction notifies with its tool name', () => {
   const h = createHarness({ summaries: { s4: session('s4') } })
-  let nextCalls = 0
-  h.waterfall('approval/request', { __sessionId: 's4' }, { toolName: 'bash', reason: 'rm -rf build' }, () => {
-    nextCalls += 1
-    return Promise.resolve('allow')
-  })
+  h.upsertPending('s4', { sessionId: 's4', kind: 'approval', key: 'approval:1', toolName: 'bash', reason: 'rm -rf build' })
 
-  assert.equal(nextCalls, 1)
   const body = h.notifications()[0].options.body
   assert.match(body, /^请求权限：bash/)
   assert.ok(!body.includes('rm -rf build'), 'redacted body keeps the command out')
@@ -68,7 +65,7 @@ test('approval waterfall observes and always returns next()', () => {
 test('approval with redaction off appends one detail line capped at 80 characters', () => {
   const reason = 'Command rm -rf build requires approval because it deletes files under the workspace root.'
   const h = createHarness({ summaries: { s5: session('s5') }, value: { redact: false } })
-  h.waterfall('approval/request', { __sessionId: 's5' }, { toolName: 'bash', reason }, () => Promise.resolve())
+  h.upsertPending('s5', { sessionId: 's5', kind: 'approval', key: 'approval:2', toolName: 'bash', reason })
 
   const lines = h.notifications()[0].options.body.split('\n')
   assert.equal(lines.length, 2, 'detail is a second line')
@@ -108,8 +105,8 @@ test('foreground suppression applies to all four triggers', () => {
       h.emit('api-session/status', 's9', true)
       h.emit('api-session/status', 's9', false)
     }],
-    ['question', (h) => h.waterfall('user-questions/request', { __sessionId: 's9' }, { questions: [{}] }, () => Promise.resolve())],
-    ['approval', (h) => h.waterfall('approval/request', { __sessionId: 's9' }, { toolName: 'bash' }, () => Promise.resolve())],
+    ['question', (h) => h.upsertPending('s9', { sessionId: 's9', kind: 'question', key: 'question:s9:1', questions: [{}] })],
+    ['approval', (h) => h.upsertPending('s9', { sessionId: 's9', kind: 'approval', key: 'approval:9', toolName: 'bash' })],
     ['error', (h) => h.emit('api-session/error', 's9', 'boom')],
   ]
   for (const [name, fire] of triggers) {
@@ -194,8 +191,8 @@ test('each trigger switch independently disables its notification', () => {
       h.emit('api-session/status', 's15', true)
       h.emit('api-session/status', 's15', false)
     }],
-    ['notifyOnQuestion', 'question', (h) => h.waterfall('user-questions/request', { __sessionId: 's15' }, { questions: [{}] }, () => Promise.resolve())],
-    ['notifyOnApproval', 'approval', (h) => h.waterfall('approval/request', { __sessionId: 's15' }, { toolName: 'bash' }, () => Promise.resolve())],
+    ['notifyOnQuestion', 'question', (h) => h.upsertPending('s15', { sessionId: 's15', kind: 'question', key: 'question:s15:1', questions: [{}] })],
+    ['notifyOnApproval', 'approval', (h) => h.upsertPending('s15', { sessionId: 's15', kind: 'approval', key: 'approval:15', toolName: 'bash' })],
     ['notifyOnError', 'error', (h) => h.emit('api-session/error', 's15', 'boom')],
   ]
   for (const [field, kind, fire] of cases) {

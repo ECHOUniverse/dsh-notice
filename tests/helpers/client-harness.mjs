@@ -164,6 +164,31 @@ export function createHarness(options = {}) {
   }
   const handlers = new Map()
   const dicts = new Map()
+  const statusListeners = new Set()
+  const statusState = { snapshot: options.sessionStatus instanceof Map ? options.sessionStatus : new Map() }
+  const sessionStatus = {
+    getSnapshot: () => statusState.snapshot,
+    subscribe(listener) {
+      statusListeners.add(listener)
+      return () => statusListeners.delete(listener)
+    },
+  }
+  function publishStatus(next) {
+    statusState.snapshot = next
+    statusListeners.forEach((listener) => {
+      try {
+        listener()
+      } catch (error) {
+        // A listener failure belongs to its owner.
+      }
+    })
+  }
+  function writeStatus(sessionId, update) {
+    const next = new Map(statusState.snapshot)
+    const previous = next.get(sessionId) || { running: false, completionUnread: false, pendingInteraction: undefined }
+    next.set(sessionId, { ...previous, ...update(previous) })
+    publishStatus(next)
+  }
   const disposers = []
   const formSubscribers = new Set()
   const formSetCalls = []
@@ -235,6 +260,7 @@ export function createHarness(options = {}) {
         return form
       },
     },
+    uiSession: options.uiSessionAvailable === false ? undefined : { sessionStatus },
     slots: {
       inject(name, callback) {
         if (name !== 'plugins.row.config') throw new Error('unexpected slot: ' + name)
@@ -304,6 +330,22 @@ export function createHarness(options = {}) {
     },
     setProjections(next) {
       state.projections = { ...next }
+    },
+    /** Replace the whole uiSession.sessionStatus snapshot. */
+    setSessionStatus(next) {
+      publishStatus(next instanceof Map ? next : new Map(Object.entries(next || {})))
+    },
+    /** Publish a pending interaction for one session, like the official plugins do. */
+    upsertPending(sessionId, interaction) {
+      writeStatus(sessionId, () => ({ pendingInteraction: interaction }))
+    },
+    /** Clear the pending interaction for one session. */
+    clearPending(sessionId) {
+      writeStatus(sessionId, () => ({ pendingInteraction: undefined }))
+    },
+    /** Names of every forwarded event this plugin subscribed to. */
+    remoteEvents() {
+      return [...handlers.keys()]
     },
     /** Set the durable title projection for one session. */
     setProjectionTitle(sessionId, title) {
