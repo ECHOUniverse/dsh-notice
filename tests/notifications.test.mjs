@@ -26,6 +26,7 @@ test('final completion notifies with elapsed time and project basename', () => {
   h.emit('api-session/status', 's1', true)
   h.setNow(1_005_000)
   h.emit('api-session/status', 's1', false)
+  h.advance(2000)
 
   const [notification] = h.notifications()
   assert.equal(notification.title, 'Fix the build')
@@ -33,12 +34,12 @@ test('final completion notifies with elapsed time and project basename', () => {
   assert.equal(notification.options.silent, true, 'smart policy silences completion')
 })
 
-test('completion without an observed start omits the duration but still notifies', () => {
+test('a false observation without an open root cycle does not notify', () => {
   const h = createHarness({ summaries: { s2: session('s2') } })
   h.emit('api-session/status', 's2', false)
+  h.advance(10_000)
 
-  const [notification] = h.notifications()
-  assert.equal(notification.options.body, '已完成 · project-s2')
+  assert.equal(h.notifications().length, 0, 'completion is rooted in a cycle opened by a root running=true')
 })
 
 test('a pending question interaction notifies with its question count', () => {
@@ -113,6 +114,7 @@ test('foreground suppression applies to all four triggers', () => {
     const h = createHarness({ summaries: { s9: session('s9') } })
     h.focusDocument(true)
     fire(h)
+    h.advance(2000)
     assert.equal(h.notifications().length, 0, `${name} must be suppressed while the window is focused`)
   }
 })
@@ -178,6 +180,7 @@ test('sound policy matrix maps to the silent option', () => {
     if (kind === 'complete') {
       h.emit('api-session/status', 's14', true)
       h.emit('api-session/status', 's14', false)
+      h.advance(2000)
     } else {
       h.emit('api-session/error', 's14', 'boom')
     }
@@ -198,6 +201,7 @@ test('each trigger switch independently disables its notification', () => {
   for (const [field, kind, fire] of cases) {
     const h = createHarness({ summaries: { s15: session('s15') }, value: { [field]: false } })
     fire(h)
+    h.advance(2000)
     assert.equal(h.notifications().length, 0, `${field}=false suppresses ${kind}`)
   }
 })

@@ -11,6 +11,8 @@ import fs from 'node:fs'
 import vm from 'node:vm'
 
 const CLIENT_SOURCE = new URL('../../src/client.js', import.meta.url)
+/** Hard stop for runaway virtual timers (a timer scheduling a zero-delay timer forever). */
+const MAX_TIMER_STEPS = 1000
 
 /** Notification objects created by the bundle under test. */
 export class FakeNotification {
@@ -113,12 +115,53 @@ export function loadClient() {
     RegExp,
     isNaN,
     parseInt,
-    setTimeout,
-    clearTimeout,
+    setTimeout: fakeSetTimeout,
+    clearTimeout: fakeClearTimeout,
     // Deterministic clock: tests set `sandbox.__now` to control durations.
     Date: { now: () => sandbox.__now },
   }
   sandbox.__now = 1_000_000
+
+  // Virtual timers: no test ever sleeps. Callbacks run in due order when the
+  // test calls `advance(ms)`, and timers scheduled inside a callback run too.
+  const timers = new Map()
+  let nextTimerId = 0
+  function fakeSetTimeout(callback, delay, ...args) {
+    const id = (nextTimerId += 1)
+    const wait = typeof delay === 'number' && Number.isFinite(delay) ? Math.max(0, delay) : 0
+    timers.set(id, { id, callback, args, due: sandbox.__now + wait })
+    return id
+  }
+  function fakeClearTimeout(id) {
+    timers.delete(id)
+  }
+  function advance(ms) {
+    const delta = typeof ms === 'number' && Number.isFinite(ms) ? Math.max(0, ms) : 0
+    const target = sandbox.__now + delta
+    let steps = 0
+    while (true) {
+      let next
+      timers.forEach((entry) => {
+        if (entry.due > target) return
+        if (next === undefined || entry.due < next.due || (entry.due === next.due && entry.id < next.id)) next = entry
+      })
+      if (next === undefined) break
+      if (steps >= MAX_TIMER_STEPS) {
+        console.warn('[client-harness] advance hit the timer iteration limit')
+        break
+      }
+      steps += 1
+      timers.delete(next.id)
+      sandbox.__now = Math.max(sandbox.__now, next.due)
+      try {
+        next.callback(...next.args)
+      } catch (error) {
+        console.warn('[client-harness] timer callback failed', error)
+      }
+    }
+    sandbox.__now = target
+  }
+
   const context = vm.createContext(sandbox)
   vm.runInContext(source, context, { filename: 'client.js' })
   const captured = window.captured
@@ -131,7 +174,7 @@ export function loadClient() {
     if (modules[name] === undefined) throw new Error(`unexpected require: ${name}`)
     return modules[name]
   })
-  return { id: captured.id, module, sandbox, window, requested, modules }
+  return { id: captured.id, module, sandbox, window, requested, modules, advance }
 }
 
 /** Translate from a registered dictionary, mirroring the locale service's lookup. */
@@ -159,11 +202,14 @@ export function createHarness(options = {}) {
     status: options.status || 'ready',
     writable: options.writable !== false,
     summaries: { ...(options.summaries || {}) },
+    // Optional Host-list id fixture: when omitted, every summary key is listed.
+    ids: options.ids === undefined ? undefined : [...options.ids],
     projections: { ...(options.projections || {}) },
     lang: options.locale || 'zh',
   }
   const handlers = new Map()
   const dicts = new Map()
+  const summaryListeners = new Set()
   const statusListeners = new Set()
   const statusState = { snapshot: options.sessionStatus instanceof Map ? options.sessionStatus : new Map() }
   const sessionStatus = {
@@ -243,11 +289,15 @@ export function createHarness(options = {}) {
       list: {
         getSnapshot() {
           return {
-            ids: Object.keys(state.summaries),
+            ids: state.ids === undefined ? Object.keys(state.summaries) : [...state.ids],
             byId: state.summaries,
             phase: 'ready',
             projectionsBySession: state.projections,
           }
+        },
+        subscribe(listener) {
+          summaryListeners.add(listener)
+          return () => summaryListeners.delete(listener)
         },
       },
       scopeOf(subject) {
@@ -325,8 +375,19 @@ export function createHarness(options = {}) {
     setLocale(lang) {
       state.lang = lang
     },
-    setSummaries(next) {
+    setSummaries(next, ids) {
       state.summaries = { ...next }
+      // The optional `ids` argument models the Host list baseline: keys absent
+      // from it exist only as `byId` fallback rows. Omitting it restores the
+      // default where every summary row is Host-listed.
+      state.ids = ids === undefined ? undefined : [...ids]
+      summaryListeners.forEach((listener) => {
+        try {
+          listener()
+        } catch (error) {
+          // A listener failure belongs to its owner.
+        }
+      })
     },
     setProjections(next) {
       state.projections = { ...next }
@@ -353,6 +414,10 @@ export function createHarness(options = {}) {
     },
     setNow(value) {
       loaded.sandbox.__now = value
+    },
+    /** Move the virtual clock forward and run every timer that falls due. */
+    advance(ms) {
+      loaded.advance(ms)
     },
     focusDocument(focused) {
       loaded.sandbox.document = focused

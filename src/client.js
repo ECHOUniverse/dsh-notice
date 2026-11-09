@@ -408,8 +408,6 @@ window.__ModuleLoader__.load({
 		var subagentSessions = new Set();
 		/** Last pending-interaction key already announced, per session (dedupe across status snapshots). */
 		var announcedPending = new Map();
-		/** Start time of the current run per session, for completion durations. */
-		var runStartedAt = new Map();
 
 		/** Close one live notification by key and drop every reference. */
 		function closeLive(key) {
@@ -553,6 +551,867 @@ window.__ModuleLoader__.load({
 			} catch (error) {
 				console.warn('[dsh-notice] notification dispatch failed', error);
 			}
+		}
+		//#endregion
+
+		//#region completion aggregation
+		/** Fixed silence window before a root session cycle may deliver completion. */
+		var QUIET_MS = 2000;
+		/** Defensive upper bound while walking a parent chain (cycle guard, not a product limit). */
+		var TREE_DEPTH_LIMIT = 64;
+		/** Normalized metadata per session, from forwarded summaries and list rows. */
+		var sessionMeta = new Map();
+		/** Last observed running value per session. */
+		var runningState = new Map();
+		/** Current non-null pending interaction per session; blocks completion, any kind or key. */
+		var pendingBySession = new Map();
+		/** Sessions observed running without metadata; globally blocks every root. */
+		var unattributedRunning = new Set();
+		/** Sessions observed pending without metadata; globally blocks every root. */
+		var unattributedPending = new Set();
+		/** Root-anchored completion cycles, keyed by root session id. */
+		var cycles = new Map();
+		/** Whether the first authoritative session list snapshot has been applied. */
+		var listBaselineReady = false;
+		/** Set by dispose; every handler and timer returns early afterwards. */
+		var disposed = false;
+		/** Cancels the `ctx.sessions.list` subscription. */
+		var listUnsubscribe = function () {};
+
+		/** Reset all aggregation state; called when the plugin mounts. */
+		function resetCompletionState() {
+			disposed = false;
+			listBaselineReady = false;
+			sessionMeta = new Map();
+			runningState = new Map();
+			pendingBySession = new Map();
+			unattributedRunning = new Set();
+			unattributedPending = new Set();
+			cycles = new Map();
+			listUnsubscribe = function () {};
+		}
+
+		/** Cancel one cycle's quiet timer, ignoring a timer that already fired. */
+		function clearCycleTimer(cycle) {
+			if (cycle === undefined || cycle.timer === undefined) return;
+			var timer = cycle.timer;
+			cycle.timer = undefined;
+			try {
+				clearTimeout(timer);
+			} catch (error) {
+				console.warn('[dsh-notice] failed to clear quiet timer', error);
+			}
+		}
+
+		/** Drop one cycle without delivering completion. */
+		function cancelCycle(rootId) {
+			var cycle = cycles.get(rootId);
+			if (cycle === undefined) return;
+			clearCycleTimer(cycle);
+			cycles.delete(rootId);
+		}
+
+		/**
+		 * Start an Active cycle for a root session.
+		 *
+		 * @param rootId - root session identity.
+		 * @param durationKnown - true only for cycles opened by a root status event.
+		 */
+		function createCycle(rootId, durationKnown) {
+			var cycle = {
+				rootId: rootId,
+				state: 'Active',
+				startedAt: Date.now(),
+				durationKnown: durationKnown === true,
+				quietSince: undefined,
+				timer: undefined,
+			};
+			cycles.set(rootId, cycle);
+			return cycle;
+		}
+
+		/**
+		 * Assign one normalized metadata field, reporting whether it changed.
+		 *
+		 * `undefined` means "not declared", `null` or the empty string clears the
+		 * field; a non-empty string is the new value.
+		 *
+		 * @param meta - normalized session metadata.
+		 * @param field - `parentId` or `origin`.
+		 * @param value - declared value from a wire summary or list row.
+		 * @returns true when the cached value changed.
+		 */
+		function assignMetaValue(meta, field, value) {
+			var previous = meta[field];
+			if (value === undefined) return false;
+			if (value === null || value === '') {
+				if (previous === undefined) return false;
+				meta[field] = undefined;
+				return true;
+			}
+			if (typeof value !== 'string') return false;
+			if (previous === value) return false;
+			meta[field] = value;
+			return true;
+		}
+
+		/**
+		 * Merge one `api-session/added` wire summary into the metadata cache.
+		 * A summary without a field never clears it; explicit null/empty clears.
+		 *
+		 * @param sessionId - normalized session identity (`summary.sessionId`).
+		 * @param summary - wire summary.
+		 * @returns true when parent/origin metadata changed.
+		 */
+		function mergeSummaryMeta(sessionId, summary) {
+			var meta = sessionMeta.get(sessionId);
+			var changed = false;
+			if (meta === undefined) {
+				meta = { id: sessionId, parentId: undefined, origin: undefined, hostListed: false };
+				sessionMeta.set(sessionId, meta);
+				changed = true;
+			}
+			if (assignMetaValue(meta, 'parentId', summary.parentSessionId)) changed = true;
+			if (assignMetaValue(meta, 'origin', summary.origin)) changed = true;
+			return changed;
+		}
+
+		/**
+		 * Resolve which root a session belongs to using only normalized metadata.
+		 *
+		 * @param sessionId - session identity.
+		 * @returns `{ kind: 'root', rootId }`, `{ kind: 'unknown' }`, or `{ kind: 'orphan' }`.
+		 */
+		function rootOf(sessionId) {
+			var current = sessionId;
+			var visited = new Set();
+			var steps = 0;
+			while (typeof current === 'string' && current !== '') {
+				if (visited.has(current)) return { kind: 'orphan' };
+				visited.add(current);
+				var meta = sessionMeta.get(current);
+				if (meta === undefined) return current === sessionId ? { kind: 'unknown' } : { kind: 'orphan' };
+				if (meta.origin !== 'subagent') return { kind: 'root', rootId: current };
+				if (typeof meta.parentId !== 'string' || meta.parentId === '') return { kind: 'orphan' };
+				// The guard bounds parent hops, not visited nodes: exactly
+				// TREE_DEPTH_LIMIT upward moves still resolve a normal tree.
+				if (steps >= TREE_DEPTH_LIMIT) return { kind: 'orphan' };
+				steps += 1;
+				current = meta.parentId;
+			}
+			return { kind: 'unknown' };
+		}
+
+		/** Whether a session is the root itself or one of its known local descendants. */
+		function isDescendantOf(sessionId, rootId) {
+			var current = sessionId;
+			var visited = new Set();
+			while (typeof current === 'string' && current !== '') {
+				if (current === rootId) return true;
+				if (visited.has(current)) return false;
+				visited.add(current);
+				if (visited.size > TREE_DEPTH_LIMIT) return false;
+				var meta = sessionMeta.get(current);
+				if (meta === undefined) return false;
+				if (meta.origin !== 'subagent') return false;
+				if (typeof meta.parentId !== 'string' || meta.parentId === '') return false;
+				current = meta.parentId;
+			}
+			return false;
+		}
+
+		/** Whether any really-changed session belongs to the root's local subtree. */
+		function subtreeHasChange(changedIds, rootId) {
+			if (changedIds === undefined || changedIds === null) return false;
+			var hit = false;
+			changedIds.forEach(function (sessionId) {
+				if (hit) return;
+				if (sessionId === rootId || isDescendantOf(sessionId, rootId)) hit = true;
+			});
+			return hit;
+		}
+
+		/** True while the root or any known local descendant is running. */
+		function subtreeBusy(rootId) {
+			if (runningState.get(rootId) === true) return true;
+			var busy = false;
+			sessionMeta.forEach(function (meta, sessionId) {
+				if (busy || sessionId === rootId) return;
+				if (runningState.get(sessionId) !== true) return;
+				if (isDescendantOf(sessionId, rootId)) busy = true;
+			});
+			return busy;
+		}
+
+		/**
+		 * Read the public session list snapshot without trusting its shape.
+		 *
+		 * @param ctx - client plugin context.
+		 * @returns `{ byId, ids }`, or undefined when the baseline is unreadable.
+		 */
+		function readListSnapshot(ctx) {
+			if (ctx.sessions === undefined || ctx.sessions === null) return undefined;
+			var list = ctx.sessions.list;
+			if (list === undefined || list === null || typeof list.getSnapshot !== 'function') return undefined;
+			var state = list.getSnapshot();
+			if (state === undefined || state === null || typeof state !== 'object') return undefined;
+			// A list store that reports a readiness phase is only usable once ready;
+			// shapes without a phase stay readable as before.
+			if (typeof state.phase === 'string' && state.phase !== 'ready') return undefined;
+			var byId = state.byId;
+			if (byId === undefined || byId === null || typeof byId !== 'object') return undefined;
+			// `ids` is the Host-list baseline: without it every row would look
+			// authoritative, so an unshaped snapshot is treated as unreadable.
+			if (!Array.isArray(state.ids)) return undefined;
+			var ids = [];
+			for (var index = 0; index < state.ids.length; index += 1) {
+				if (typeof state.ids[index] === 'string') ids.push(state.ids[index]);
+			}
+			return { byId: byId, ids: ids };
+		}
+
+		/**
+		 * Merge one list snapshot into the normalized metadata/running caches.
+		 *
+		 * Only Host-listed rows establish or correct `running`; rows that exist
+		 * only in `byId` contribute metadata and never clear a running observation.
+		 *
+		 * @param snapshot - result of {@link readListSnapshot}.
+		 * @param initial - true only for the first baseline: existing observations win.
+		 * @returns the sessions whose running value changed and whether tree metadata changed.
+		 */
+		function mergeListSnapshot(snapshot, initial) {
+			var hostIds;
+			if (snapshot.ids !== undefined) {
+				hostIds = new Set();
+				for (var index = 0; index < snapshot.ids.length; index += 1) hostIds.add(snapshot.ids[index]);
+			}
+			var runningChanged = new Set();
+			var metadataChanged = false;
+			var keys = Object.keys(snapshot.byId);
+			for (var keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+				var row = snapshot.byId[keys[keyIndex]];
+				if (row === undefined || row === null || typeof row !== 'object') continue;
+				var sessionId = typeof row.id === 'string' && row.id !== '' ? row.id : keys[keyIndex];
+				if (typeof sessionId !== 'string' || sessionId === '') continue;
+				var hostListed = hostIds === undefined ? true : hostIds.has(sessionId);
+				var meta = sessionMeta.get(sessionId);
+				if (meta === undefined) {
+					meta = { id: sessionId, parentId: undefined, origin: undefined, hostListed: false };
+					sessionMeta.set(sessionId, meta);
+					metadataChanged = true;
+				}
+				// The initial baseline only fills fields that no event has declared;
+				// later snapshots are authoritative and may correct metadata.
+				if (!initial || meta.parentId === undefined) {
+					if (assignMetaValue(meta, 'parentId', row.parentId)) metadataChanged = true;
+				}
+				if (!initial || meta.origin === undefined) {
+					if (assignMetaValue(meta, 'origin', row.origin)) metadataChanged = true;
+				}
+				meta.hostListed = hostListed;
+				// The pre-catalog subagent filter mirrors normalized origin, so a
+				// list row that re-declares a child as a root must release it.
+				if (meta.origin === 'subagent') subagentSessions.add(sessionId);
+				else subagentSessions.delete(sessionId);
+				// A list row is metadata: it resolves unattributed observations
+				// even when it is only a fallback row.
+				unattributedRunning.delete(sessionId);
+				unattributedPending.delete(sessionId);
+				if (hostListed && typeof row.running === 'boolean') {
+					var previous = runningState.get(sessionId);
+					if (initial && previous !== undefined) continue;
+					if (previous !== row.running) {
+						runningState.set(sessionId, row.running);
+						runningChanged.add(sessionId);
+					}
+				}
+			}
+			return { runningChanged: runningChanged, metadataChanged: metadataChanged };
+		}
+
+		/**
+		 * Discover one session's metadata with a single list read.
+		 *
+		 * The read only fills metadata that is still missing and a Host-listed
+		 * running value that no status event has observed yet; it never overwrites
+		 * a just-arrived status observation.
+		 *
+		 * @param ctx - client plugin context.
+		 * @param sessionId - session identity.
+		 * @returns true when the read produced metadata for this session.
+		 */
+		function discoverMeta(ctx, sessionId) {
+			if (sessionMeta.has(sessionId)) return false;
+			try {
+				var snapshot = readListSnapshot(ctx);
+				if (snapshot === undefined) return false;
+				var row = snapshot.byId[sessionId];
+				if (row === undefined || row === null || typeof row !== 'object') return false;
+				var hostListed = false;
+				for (var index = 0; index < snapshot.ids.length; index += 1) {
+					if (snapshot.ids[index] === sessionId) {
+						hostListed = true;
+						break;
+					}
+				}
+				var meta = { id: sessionId, parentId: undefined, origin: undefined, hostListed: hostListed };
+				sessionMeta.set(sessionId, meta);
+				assignMetaValue(meta, 'parentId', row.parentId);
+				assignMetaValue(meta, 'origin', row.origin);
+				if (hostListed && typeof row.running === 'boolean' && runningState.get(sessionId) === undefined) {
+					runningState.set(sessionId, row.running);
+				}
+				// Metadata now decides root/child/orphan; the session is no longer
+				// globally blocking.
+				unattributedRunning.delete(sessionId);
+				unattributedPending.delete(sessionId);
+				return true;
+			} catch (error) {
+				console.warn('[dsh-notice] session metadata discovery failed', error);
+				return false;
+			}
+		}
+
+		/**
+		 * Read the pending-interaction snapshot defensively.
+		 *
+		 * @returns the status map, `undefined` when the service is unavailable, or
+		 * `null` when the read failed and the previous blocking set must survive.
+		 */
+		function readPendingSnapshot(ctx) {
+			var ui = ctx.uiSession;
+			if (ui === undefined || ui === null) return undefined;
+			var source = ui.sessionStatus;
+			if (source === undefined || source === null || typeof source.getSnapshot !== 'function') return undefined;
+			try {
+				var snapshot = source.getSnapshot();
+				if (snapshot === undefined || snapshot === null || typeof snapshot.forEach !== 'function') return null;
+				return snapshot;
+			} catch (error) {
+				console.warn('[dsh-notice] pending interaction snapshot failed', error);
+				return null;
+			}
+		}
+
+		/**
+		 * Merge a pending snapshot into the blocking map. Any non-null
+		 * `pendingInteraction` blocks, regardless of kind or key; alert dedupe
+		 * stays in `announcedPending`.
+		 *
+		 * @param ctx - client plugin context.
+		 * @param snapshot - readable `sessionStatus` map.
+		 * @returns changed session ids and whether metadata was discovered, or
+		 * `undefined` when the scan itself failed.
+		 */
+		function syncPendingSnapshot(ctx, snapshot) {
+			var current = new Map();
+			try {
+				snapshot.forEach(function (status, sessionId) {
+					if (typeof sessionId !== 'string' || sessionId === '') return;
+					var interaction = status === undefined || status === null ? undefined : status.pendingInteraction;
+					if (interaction === undefined || interaction === null) return;
+					current.set(sessionId, interaction);
+				});
+			} catch (error) {
+				console.warn('[dsh-notice] pending interaction scan failed', error);
+				return undefined;
+			}
+			var changed = new Set();
+			var metadataChanged = false;
+			current.forEach(function (interaction, sessionId) {
+				if (!pendingBySession.has(sessionId)) changed.add(sessionId);
+				pendingBySession.set(sessionId, interaction);
+				if (!sessionMeta.has(sessionId) && discoverMeta(ctx, sessionId)) metadataChanged = true;
+				if (sessionMeta.has(sessionId)) unattributedPending.delete(sessionId);
+				else unattributedPending.add(sessionId);
+			});
+			var stale = [];
+			pendingBySession.forEach(function (interaction, sessionId) {
+				if (!current.has(sessionId)) stale.push(sessionId);
+			});
+			for (var index = 0; index < stale.length; index += 1) {
+				pendingBySession.delete(stale[index]);
+				unattributedPending.delete(stale[index]);
+				changed.add(stale[index]);
+			}
+			return { changed: changed, metadataChanged: metadataChanged };
+		}
+
+		/** True while an observation exists that cannot be attributed to any root. */
+		function globalBlocked() {
+			return unattributedRunning.size > 0 || unattributedPending.size > 0;
+		}
+
+		/** True while any known session in the root's subtree has a pending interaction. */
+		function subtreeHasPending(rootId) {
+			var hit = false;
+			pendingBySession.forEach(function (interaction, sessionId) {
+				if (hit) return;
+				if (sessionId === rootId || isDescendantOf(sessionId, rootId)) hit = true;
+			});
+			return hit;
+		}
+
+		/**
+		 * Open seed cycles for running roots seen in a list snapshot. Seed cycles
+		 * never carry a duration and never schedule a timer by themselves.
+		 */
+		function seedRunningRoots() {
+			var runningIds = [];
+			runningState.forEach(function (running, sessionId) {
+				if (running === true) runningIds.push(sessionId);
+			});
+			for (var index = 0; index < runningIds.length; index += 1) {
+				var sessionId = runningIds[index];
+				if (cycles.has(sessionId)) continue;
+				var root = rootOf(sessionId);
+				if (root.kind !== 'root' || root.rootId !== sessionId) continue;
+				createCycle(sessionId, false);
+			}
+		}
+
+		/** Cancel every cycle whose key is no longer the root of its own session. */
+		function cancelInvalidCycles() {
+			var victims = [];
+			cycles.forEach(function (cycle, rootId) {
+				var classification = rootOf(rootId);
+				if (classification.kind !== 'root' || classification.rootId !== rootId) victims.push(rootId);
+			});
+			for (var index = 0; index < victims.length; index += 1) cancelCycle(victims[index]);
+		}
+
+		/**
+		 * Re-resolve tree ownership after metadata changes.
+		 *
+		 * Cycles whose session stopped being a root are cancelled, running roots
+		 * that gained root status get a seed cycle, and every surviving cycle is
+		 * re-evaluated.
+		 *
+		 * @param ctx - client plugin context.
+		 * @param t - translate function.
+		 */
+		function reResolveCycles(ctx, t, changedIds) {
+			cancelInvalidCycles();
+			seedRunningRoots();
+			evaluateAllCycles(ctx, t, changedIds);
+		}
+
+		/** Apply the first list baseline. It never schedules or delivers completion. */
+		function seedListBaseline(ctx) {
+			try {
+				var snapshot = readListSnapshot(ctx);
+				if (snapshot === undefined) {
+					console.warn('[dsh-notice] session list baseline is unavailable');
+					return false;
+				}
+				mergeListSnapshot(snapshot, true);
+				seedRunningRoots();
+				listBaselineReady = true;
+				return true;
+			} catch (error) {
+				console.warn('[dsh-notice] session list baseline failed', error);
+				return false;
+			}
+		}
+
+		/** Follow later list snapshots; titles do not notify, running/metadata changes re-evaluate cycles. */
+		function handleListSnapshot(ctx, t) {
+			if (disposed) return;
+			try {
+				var snapshot = readListSnapshot(ctx);
+				if (snapshot === undefined) return;
+				var wasReady = listBaselineReady;
+				var merged = mergeListSnapshot(snapshot, !wasReady);
+				listBaselineReady = true;
+				seedRunningRoots();
+				if (!wasReady || merged.metadataChanged) reResolveCycles(ctx, t, merged.runningChanged);
+				else if (merged.runningChanged.size > 0) evaluateAllCycles(ctx, t, merged.runningChanged);
+			} catch (error) {
+				console.warn('[dsh-notice] session list update failed', error);
+			}
+		}
+
+		/**
+		 * Follow one `api-session/added` wire summary.
+		 *
+		 * The summary establishes parent/origin/running for one session. A running
+		 * root that has no cycle gets a seed cycle; a running child only blocks an
+		 * existing root cycle. Metadata changes re-resolve the whole known tree.
+		 */
+		function handleAdded(ctx, t, summary) {
+			try {
+				if (disposed) return;
+				if (summary === undefined || summary === null || typeof summary !== 'object') return;
+				if (summary.sessionId === undefined || summary.sessionId === null) return;
+				var sessionId = summary.sessionId;
+				if (typeof sessionId !== 'string' || sessionId === '') return;
+				if (summary.origin === 'subagent') subagentSessions.add(sessionId);
+				else subagentSessions.delete(sessionId);
+				var metaChanged = mergeSummaryMeta(sessionId, summary);
+				// The wire summary carries metadata, so this observation is no
+				// longer unattributed.
+				unattributedRunning.delete(sessionId);
+				unattributedPending.delete(sessionId);
+				var runningChanged = false;
+				if (typeof summary.running === 'boolean') {
+					if (runningState.get(sessionId) !== summary.running) {
+						runningState.set(sessionId, summary.running);
+						runningChanged = true;
+					}
+				}
+				if (!metaChanged && !runningChanged) return;
+				var changed = runningChanged ? new Set([sessionId]) : undefined;
+				if (metaChanged) {
+					reResolveCycles(ctx, t, changed);
+					return;
+				}
+				var classification = rootOf(sessionId);
+				if (classification.kind !== 'root') return;
+				if (classification.rootId === sessionId) {
+					if (runningState.get(sessionId) === true && !cycles.has(sessionId)) createCycle(sessionId, false);
+					evaluateCycle(ctx, t, sessionId, changed);
+					return;
+				}
+				if (cycles.has(classification.rootId)) evaluateCycle(ctx, t, classification.rootId, changed);
+			} catch (error) {
+				console.warn('[dsh-notice] session added handler failed', error);
+			}
+		}
+
+		/**
+		 * Follow one `api-session/removed` observation.
+		 *
+		 * Removal is neither completion nor failure. It drops the session's
+		 * metadata, running, pending, and alert-dedupe state, closes its live
+		 * notification, cancels a cycle the session owned, and re-evaluates the
+		 * former root. Descendants lose their parent chain and become orphans, so
+		 * they stop blocking any root without opening a cycle of their own.
+		 *
+		 * @param ctx - client plugin context.
+		 * @param t - translate function.
+		 * @param sessionId - removed session identity.
+		 */
+		function handleRemoved(ctx, t, sessionId) {
+			try {
+				if (disposed) return;
+				if (typeof sessionId !== 'string' || sessionId === '') return;
+				var oldRoot = rootOf(sessionId);
+				var ownedCycle = cycles.has(sessionId);
+				sessionMeta.delete(sessionId);
+				runningState.delete(sessionId);
+				pendingBySession.delete(sessionId);
+				announcedPending.delete(sessionId);
+				unattributedRunning.delete(sessionId);
+				unattributedPending.delete(sessionId);
+				subagentSessions.delete(sessionId);
+				closeSession(sessionId);
+				if (ownedCycle || (oldRoot.kind === 'root' && oldRoot.rootId === sessionId)) {
+					// The root is gone: its cycle must never deliver. There is no
+					// tombstone; a later list row or added summary may rebuild it.
+					cancelCycle(sessionId);
+				}
+				// A child removal can free its former root, an unattributed removal
+				// can lift the global gate, and removed descendants are now orphans.
+				evaluateAllCycles(ctx, t);
+			} catch (error) {
+				console.warn('[dsh-notice] session removed handler failed', error);
+			}
+		}
+
+		/** Subscribe to the public list store, if this deployment exposes one. */
+		function subscribeList(ctx, t) {
+			var list = ctx.sessions === undefined || ctx.sessions === null ? undefined : ctx.sessions.list;
+			if (list === undefined || list === null || typeof list.subscribe !== 'function') return;
+			try {
+				var unsubscribe = list.subscribe(function () {
+					handleListSnapshot(ctx, t);
+				});
+				if (typeof unsubscribe === 'function') listUnsubscribe = unsubscribe;
+			} catch (error) {
+				console.warn('[dsh-notice] session list subscription failed', error);
+			}
+		}
+
+		/** Point the cycle's single timer at the fixed quiet window. */
+		function scheduleQuietTimer(ctx, t, cycle) {
+			clearCycleTimer(cycle);
+			try {
+				cycle.timer = setTimeout(function () {
+					handleQuietTimer(ctx, t, cycle);
+				}, QUIET_MS);
+			} catch (error) {
+				cycle.timer = undefined;
+				cycle.state = 'Active';
+				cycle.quietSince = undefined;
+				console.warn('[dsh-notice] failed to schedule quiet timer', error);
+			}
+		}
+
+		/**
+		 * Re-evaluate one root cycle after an observation change.
+		 *
+		 * Busy observation cancels the timer and returns to Active. A quiet tree
+		 * enters Quiet once and keeps its `quietSince` until a real transition.
+		 */
+		function evaluateCycle(ctx, t, rootId, changedIds) {
+			if (disposed) return;
+			var cycle = cycles.get(rootId);
+			if (cycle === undefined) return;
+			if (!listBaselineReady) {
+				clearCycleTimer(cycle);
+				cycle.state = 'Active';
+				cycle.quietSince = undefined;
+				return;
+			}
+			if (globalBlocked()) {
+				clearCycleTimer(cycle);
+				cycle.state = 'Active';
+				cycle.quietSince = undefined;
+				return;
+			}
+			if (subtreeBusy(rootId)) {
+				clearCycleTimer(cycle);
+				cycle.state = 'Active';
+				cycle.quietSince = undefined;
+				return;
+			}
+			if (subtreeHasPending(rootId)) {
+				clearCycleTimer(cycle);
+				cycle.state = 'Active';
+				cycle.quietSince = undefined;
+				return;
+			}
+			if (cycle.state === 'Quiet' && cycle.timer !== undefined) {
+				// A real transition inside the subtree starts a fresh window; a
+				// repeated or metadata-only observation keeps the current one.
+				if (subtreeHasChange(changedIds, rootId)) {
+					cycle.quietSince = Date.now();
+					scheduleQuietTimer(ctx, t, cycle);
+				}
+				return;
+			}
+			cycle.state = 'Quiet';
+			cycle.quietSince = Date.now();
+			scheduleQuietTimer(ctx, t, cycle);
+		}
+
+		/** Re-evaluate every existing cycle (used after a list snapshot). */
+		function evaluateAllCycles(ctx, t, changedIds) {
+			var ids = [];
+			cycles.forEach(function (cycle, rootId) {
+				ids.push(rootId);
+			});
+			for (var index = 0; index < ids.length; index += 1) evaluateCycle(ctx, t, ids[index], changedIds);
+		}
+
+		/** Re-evaluate every cycle except one (used by the deadline re-read). */
+		function evaluateOtherCycles(ctx, t, excludedRootId, changedIds) {
+			var ids = [];
+			cycles.forEach(function (cycle, rootId) {
+				if (rootId !== excludedRootId) ids.push(rootId);
+			});
+			for (var index = 0; index < ids.length; index += 1) evaluateCycle(ctx, t, ids[index], changedIds);
+		}
+
+		/**
+		 * Quiet timer callback. The authoritative list re-read happens here, and
+		 * completion may only be delivered through this callback.
+		 */
+		function handleQuietTimer(ctx, t, cycle) {
+			try {
+				if (disposed) return;
+				var rootId = cycle.rootId;
+				if (cycles.get(rootId) !== cycle) return;
+				cycle.timer = undefined;
+				if (cycle.state !== 'Quiet') return;
+				var snapshot = readListSnapshot(ctx);
+				if (snapshot === undefined) {
+					cycle.state = 'Active';
+					cycle.quietSince = undefined;
+					console.warn('[dsh-notice] session list unreadable at quiet deadline');
+					return;
+				}
+				var wasReady = listBaselineReady;
+				var merged = mergeListSnapshot(snapshot, !wasReady);
+				listBaselineReady = true;
+				if (merged.metadataChanged) {
+					// Ownership may have changed while the deadline approached.
+					cancelInvalidCycles();
+					if (cycles.get(rootId) !== cycle) return;
+					seedRunningRoots();
+				}
+				// Pending interactions are re-read at the deadline too. A failed
+				// read keeps the previous blocking set and cancels delivery rather
+				// than guessing that the interaction cleared.
+				var pendingSnapshot = readPendingSnapshot(ctx);
+				if (pendingSnapshot === null) {
+					cycle.state = 'Active';
+					cycle.quietSince = undefined;
+					return;
+				}
+				var pendingChanged = new Set();
+				var pendingMetaChanged = false;
+				if (pendingSnapshot !== undefined) {
+					var pendingMerged = syncPendingSnapshot(ctx, pendingSnapshot);
+					if (pendingMerged === undefined) {
+						cycle.state = 'Active';
+						cycle.quietSince = undefined;
+						return;
+					}
+					pendingChanged = pendingMerged.changed;
+					pendingMetaChanged = pendingMerged.metadataChanged;
+					if (pendingMetaChanged) seedRunningRoots();
+				}
+				var combinedChanged = new Set();
+				merged.runningChanged.forEach(function (changedId) {
+					combinedChanged.add(changedId);
+				});
+				pendingChanged.forEach(function (changedId) {
+					combinedChanged.add(changedId);
+				});
+				if (merged.metadataChanged || pendingMetaChanged || combinedChanged.size > 0) {
+					evaluateOtherCycles(ctx, t, rootId, combinedChanged);
+					if (cycles.get(rootId) !== cycle) return;
+				}
+				var root = rootOf(rootId);
+				if (root.kind !== 'root' || root.rootId !== rootId) {
+					cancelCycle(rootId);
+					return;
+				}
+				if (globalBlocked()) {
+					cycle.state = 'Active';
+					cycle.quietSince = undefined;
+					return;
+				}
+				if (subtreeBusy(rootId) || subtreeHasPending(rootId)) {
+					cycle.state = 'Active';
+					cycle.quietSince = undefined;
+					return;
+				}
+				if (subtreeHasChange(combinedChanged, rootId)) {
+					// The re-read corrected a cached busy session into idle: that is
+					// a fresh quiet transition, so wait a full window instead of
+					// delivering at the old deadline.
+					cycle.state = 'Quiet';
+					cycle.quietSince = Date.now();
+					scheduleQuietTimer(ctx, t, cycle);
+					return;
+				}
+				// Consume before delivering: suppressed or failed delivery never retries.
+				cycles.delete(rootId);
+				var durationMs;
+				if (cycle.durationKnown === true && cycle.quietSince !== undefined) {
+					durationMs = Math.max(0, cycle.quietSince - cycle.startedAt);
+				}
+				notify(ctx, t, rootId, 'complete', durationMs === undefined ? {} : { durationMs: durationMs });
+			} catch (error) {
+				console.warn('[dsh-notice] quiet timer failed', error);
+				try {
+					if (cycles.get(cycle.rootId) === cycle) {
+						clearCycleTimer(cycle);
+						cycle.state = 'Active';
+						cycle.quietSince = undefined;
+					}
+				} catch (nested) {
+					// The cycle is already detached.
+				}
+			}
+		}
+
+		/**
+		 * Handle one `api-session/status` observation. This handler never delivers
+		 * completion itself; only a quiet-timer callback may.
+		 */
+		function handleStatus(ctx, t, sessionId, running) {
+			try {
+				if (disposed) return;
+				if (typeof sessionId !== 'string' || sessionId === '') return;
+				if (typeof running !== 'boolean') return;
+				if (runningState.get(sessionId) === running) return;
+				runningState.set(sessionId, running);
+				var changed = new Set([sessionId]);
+				var blockedBefore = globalBlocked();
+				if (running === false) {
+					var wasUnattributed = unattributedRunning.delete(sessionId);
+					if (!sessionMeta.has(sessionId)) discoverMeta(ctx, sessionId);
+					if (wasUnattributed || (blockedBefore && !globalBlocked())) {
+						// Lifting the global gate may let any root become quiet.
+						evaluateAllCycles(ctx, t, changed);
+						return;
+					}
+					var classified = rootOf(sessionId);
+					if (classified.kind !== 'root') return;
+					if (classified.rootId === sessionId) {
+						evaluateCycle(ctx, t, sessionId, changed);
+						return;
+					}
+					if (cycles.has(classified.rootId)) evaluateCycle(ctx, t, classified.rootId, changed);
+					return;
+				}
+				if (!sessionMeta.has(sessionId)) discoverMeta(ctx, sessionId);
+				var classification = rootOf(sessionId);
+				if (classification.kind === 'unknown') {
+					// No metadata at all: block every root rather than guessing.
+					unattributedRunning.add(sessionId);
+					evaluateAllCycles(ctx, t, changed);
+					return;
+				}
+				var wasGlobal = unattributedRunning.delete(sessionId);
+				var unblocked = blockedBefore && !globalBlocked();
+				if (classification.kind === 'orphan') {
+					if (wasGlobal || unblocked) evaluateAllCycles(ctx, t, changed);
+					return;
+				}
+				if (classification.rootId === sessionId) {
+					if (!cycles.has(sessionId)) createCycle(sessionId, true);
+					if (wasGlobal || unblocked) evaluateAllCycles(ctx, t, changed);
+					else evaluateCycle(ctx, t, sessionId, changed);
+					return;
+				}
+				if (wasGlobal || unblocked) {
+					evaluateAllCycles(ctx, t, changed);
+					return;
+				}
+				if (cycles.has(classification.rootId)) evaluateCycle(ctx, t, classification.rootId, changed);
+			} catch (error) {
+				console.warn('[dsh-notice] session status handler failed', error);
+			}
+		}
+
+		/**
+		 * Initialize aggregation: seed the public list baseline and subscribe.
+		 *
+		 * @returns the disposer that clears every timer and aggregation state.
+		 */
+		function initCompletion(ctx, t) {
+			resetCompletionState();
+			seedListBaseline(ctx);
+			subscribeList(ctx, t);
+			try {
+				evaluateAllCycles(ctx, t);
+			} catch (error) {
+				console.warn('[dsh-notice] initial cycle evaluation failed', error);
+			}
+			return function () {
+				disposed = true;
+				cycles.forEach(function (cycle) {
+					clearCycleTimer(cycle);
+				});
+				cycles.clear();
+				sessionMeta.clear();
+				runningState.clear();
+				pendingBySession.clear();
+				unattributedRunning.clear();
+				unattributedPending.clear();
+				listBaselineReady = false;
+				try {
+					listUnsubscribe();
+				} catch (error) {
+					console.warn('[dsh-notice] session list unsubscribe failed', error);
+				}
+				listUnsubscribe = function () {};
+			};
 		}
 		//#endregion
 
@@ -1045,19 +1904,12 @@ window.__ModuleLoader__.load({
 			}, 'notice: dictionaries');
 
 			ctx.effect(function () {
+				return initCompletion(ctx, t);
+			}, 'notice: completion tracking');
+
+			ctx.effect(function () {
 				return ctx.remote.$on('api-session/status', function (sessionId, running) {
-					try {
-						if (running === true) {
-							if (!runStartedAt.has(sessionId)) runStartedAt.set(sessionId, Date.now());
-							return;
-						}
-						var startedAt = runStartedAt.get(sessionId);
-						runStartedAt.delete(sessionId);
-						var durationMs = startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt);
-						notify(ctx, t, sessionId, 'complete', { durationMs: durationMs });
-					} catch (error) {
-						console.warn('[dsh-notice] session status handler failed', error);
-					}
+					handleStatus(ctx, t, sessionId, running);
 				});
 			}, 'notice: api-session/status');
 
@@ -1073,24 +1925,13 @@ window.__ModuleLoader__.load({
 
 			ctx.effect(function () {
 				return ctx.remote.$on('api-session/added', function (summary) {
-					try {
-						if (summary === undefined || summary === null) return;
-						// `api-session/added` forwards the Host wire summary, whose identity
-						// field is `sessionId` (the client list row later mirrors it as `id`).
-						if (summary.sessionId === undefined || summary.sessionId === null) return;
-						if (summary.origin === 'subagent') subagentSessions.add(summary.sessionId);
-						else subagentSessions.delete(summary.sessionId);
-					} catch (error) {
-						// Catalog bookkeeping is best-effort.
-					}
+					handleAdded(ctx, t, summary);
 				});
 			}, 'notice: api-session/added');
 
 			ctx.effect(function () {
 				return ctx.remote.$on('api-session/removed', function (sessionId) {
-					subagentSessions.delete(sessionId);
-					runStartedAt.delete(sessionId);
-					closeSession(sessionId);
+					handleRemoved(ctx, t, sessionId);
 				});
 			}, 'notice: api-session/removed');
 
@@ -1156,10 +1997,24 @@ window.__ModuleLoader__.load({
 
 				// Announce interactions already pending when this bundle mounts (for
 				// example after a page refresh), then follow every status change.
-				reconcile(source.getSnapshot());
-				var unsubscribe = source.subscribe(function () {
-					reconcile(source.getSnapshot());
-				});
+				// Blocking is updated from the same snapshot; the announce pass keeps
+				// its own key-based dedupe and never gates completion.
+				function observe() {
+					try {
+						var snapshot = readPendingSnapshot(ctx);
+						if (snapshot === undefined || snapshot === null) return;
+						var merged = syncPendingSnapshot(ctx, snapshot);
+						if (merged === undefined) return;
+						if (merged.metadataChanged) seedRunningRoots();
+						evaluateAllCycles(ctx, t, merged.changed);
+						reconcile(snapshot);
+					} catch (error) {
+						console.warn('[dsh-notice] pending interaction handler failed', error);
+					}
+				}
+
+				observe();
+				var unsubscribe = source.subscribe(observe);
 				return typeof unsubscribe === 'function' ? unsubscribe : function () {};
 			}, 'notice: pending interactions');
 
@@ -1206,7 +2061,6 @@ window.__ModuleLoader__.load({
 					});
 					testNotifications.clear();
 					subagentSessions.clear();
-					runStartedAt.clear();
 					announcedPending.clear();
 				};
 			}, 'notice: live notifications');
