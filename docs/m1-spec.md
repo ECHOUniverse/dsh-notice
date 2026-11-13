@@ -58,12 +58,12 @@ src/client.js  客户端半：手写 __ModuleLoader__ 外壳（ADR 0002），构
 
 - 宿主半用 `tsc` 编译，`Config` 必须是 **schemastery**（`@deepseek-ai/schemastery` 的 `z.object`），字段逐个 `.volatile()`，否则设置表单不会出现。
 - **不要给客户端半引入任何打包器**；它必须保持 `window.__ModuleLoader__.load({ id: '<npm 包名>', factory: (require) => {…} })` 的经典脚本体，`exports.apply/inject` 由 `module.exports` 暴露。
-- row id 固定为 `notice`；所有客户端 key 必须与之对齐（`<包名>#notice`）。
+- row id 固定为 `notice`；客户端通过 `ctx.configForms.get('notice')` 获取该行的配置表单，组合包配置槽的 key 则使用包名 `@hanxu131/dsh-notice`。
 - `engines.dsh` 参考 `AutoTitle_DSH`：`>=0.2.1-rc.1 <0.3.0-0`（本机桌面版 0.2.1-rc.2 必须满足）。
 
 ## 设置界面
 
-1. **主编辑页**：`ctx.slots.inject('plugins.row.config', …)` 注册 keyed 槽，`key = '@hanxu131/dsh-notice#notice'`；页面组件从 `props.form` 拿 `state`（`value`/`user`/`revision`/`writable`）与 `mutate`，`props.view === 'summary'` 时渲染一行摘要（如 `4 类通知已开启`）。
+1. **主编辑页**：`ctx.slots.inject('plugins.bundle.config', …)` 注册 keyed 槽，`key = '@hanxu131/dsh-notice'`；配置直接显示在组合包页面的描述与行列表之间，保留组合包标题、开关、描述和 `notice` 行列表，不另建纯配置页。该槽只传 `view: 'page'`、不传单一 form，页面组件使用 `ctx.configForms.get('notice')` 的 fallbackForm；仍兼容其他嵌入方通过 `props.form` 提供 `state`（`value`/`user`/`revision`/`writable`）与 `mutate`，以及 `props.view === 'summary'` 时渲染一行摘要（如 `4 类通知已开启`）。不再注册 `plugins.row.config`，因此 `notice` 行没有「配置」控件或独立行页面。
 2. **运维控件**（Q20）：页面底部一块
    - 「发送测试通知」按钮 → 直接 `new Notification('dsh-notice test', {...})`，绕过前台抑制
    - 「通知权限状态」→ 显示 `Notification.permission`；非 `granted` 时提示「系统设置 → 通知 → DeepSeek Harness」
@@ -78,14 +78,15 @@ src/client.js  客户端半：手写 __ModuleLoader__ 外壳（ADR 0002），构
 | `ctx.remote.$on('api-session/status')` 载荷形状 | 读 `dsh-client-ui-*` 里现成用法 | 无（必须确认，这是完成通知的唯一来源） |
 | `ctx.configForms.get(entryId)` 形状 | 读 `dsh-client-ui-settings-shell` 的 `SettingsFormModel` 用法 | 直接用 `props.form` |
 | `Notification.close()` 是否可用 | 浏览器标准 API，Electron 支持 | 不替换，只追加 |
-| `plugins.item` 是否对第三方 bundle 渲染 | 真机看插件页 | 只做 `plugins.row.config`；必要时补 `plugins.bundle.config`（key = 包名，需自己 `ctx.configForms.get`） |
+| 第三方 bundle 配置入口的最终显示 | 官方文档与实现已确认 `plugins.bundle.config` 的位置和参数；真机确认最终显示 | 使用 `plugins.bundle.config`（key = 包名，自行 `ctx.configForms.get('notice')`）；不保留 `plugins.row.config` |
 
 ## 验收清单（真机）
 
 - [ ] `git init`；`pnpm run build` 通过；`node --test tests/*.test.mjs` 通过
 - [ ] `dsh plugin --profile desktop add link:/Volumes/WD-1T/00_Workspace/00_Active/CodeProject/dsh-notice` 成功
 - [ ] 完全退出并重启桌面版后，插件出现在「插件」页，bundle 未报激活失败
-- [ ] Configure 页可见 8 个字段 + 测试按钮 + 权限状态
+- [ ] `@hanxu131/dsh-notice` 组合包页面保留标题、开关、描述和 `notice` 行列表，描述与行列表之间可见 8 个字段 + 测试按钮 + 权限状态
+- [ ] `notice` 行不再显示「配置」控件，也不能进入独立行页面
 - [ ] 改任一字段 → `~/.dsh/profiles/desktop/cordis.patch.yml` 落盘且**不重启生效**
 - [ ] 点「发送测试通知」→ 弹出身份为 DeepSeek Harness 的横幅
 - [ ] 窗口**失焦**时跑一个 >10s 的任务 → 收到「已完成」通知

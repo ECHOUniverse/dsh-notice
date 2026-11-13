@@ -18,7 +18,7 @@ DeepSeek Harness 桌面版的 macOS 系统通知插件：agent **完成**、**�
   plugin --profile desktop add @hanxu131/dsh-notice
 ```
 
-安装后需要**完全退出并重启 DeepSeek Harness**（仅关闭窗口不够），插件才会加载。重启后打开「插件」页，在 `@hanxu131/dsh-notice` 的 `notice` 行点「配置」即可打开设置页。
+安装后需要**完全退出并重启 DeepSeek Harness**（仅关闭窗口不够），插件才会加载。重启后打开「插件」页并进入 `@hanxu131/dsh-notice` 组合包页面，即可在描述与 `notice` 行列表之间看到设置；`notice` 行不再提供单独的「配置」入口。
 
 > 安装/更新插件后，重启前 App 里不会出现该插件。想确认安装结果，可以看
 > `~/.dsh/profiles/desktop/package.json` 的 `dsh.profile.bundles` 是否包含
@@ -69,14 +69,15 @@ DeepSeek Harness 桌面版的 macOS 系统通知插件：agent **完成**、**�
 ## 真机验收清单
 
 1. 重启 App 后，「插件」页能看到 `@hanxu131/dsh-notice`，且 bundle 没有激活失败。
-2. `notice` 行的「配置」页可见 8 个字段、测试按钮与权限状态行。
-3. 改任一字段 → `~/.dsh/profiles/desktop/cordis.patch.yml` 落盘，且不重启即时生效。
-4. 点「发送测试通知」→ 出现发送者为 DeepSeek Harness 的横幅。
-5. 窗口失焦时跑一个 >10s 的任务 → 收到「已完成」通知；窗口聚焦时同样任务 → 不收到。
-6. `ask_user_question` 的询问 → 收到通知，问题卡片仍可正常回答。
-7. 触发一次权限审批 → 收到通知，审批流程正常。
-8. 制造一次运行失败 → 收到错误通知。
-9. 同一会话连续两次通知 → 通知中心只保留最新一条。
+2. 打开 `@hanxu131/dsh-notice` 组合包页面，标题、开关、描述和 `notice` 行列表仍然保留，且描述与行列表之间可见 8 个字段、测试按钮与权限状态行。
+3. `notice` 行不再显示「配置」控件，也不能进入独立的行配置页面。
+4. 改任一字段 → `~/.dsh/profiles/desktop/cordis.patch.yml` 落盘，且不重启即时生效。
+5. 点「发送测试通知」→ 出现发送者为 DeepSeek Harness 的横幅。
+6. 窗口失焦时跑一个 >10s 的任务 → 收到「已完成」通知；窗口聚焦时同样任务 → 不收到。
+7. `ask_user_question` 的询问 → 收到通知，问题卡片仍可正常回答。
+8. 触发一次权限审批 → 收到通知，审批流程正常。
+9. 制造一次运行失败 → 收到错误通知。
+10. 同一会话连续两次通知 → 通知中心只保留最新一条。
 
 ## 开发
 

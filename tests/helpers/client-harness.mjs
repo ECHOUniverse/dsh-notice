@@ -239,6 +239,8 @@ export function createHarness(options = {}) {
   const formSubscribers = new Set()
   const formSetCalls = []
   const registration = { options: undefined, component: undefined, injectFace: {} }
+  const registrations = []
+  const injectedSlots = []
   const configFormAvailable = options.configFormsAvailable !== false
 
   const form = {
@@ -313,25 +315,33 @@ export function createHarness(options = {}) {
     uiSession: options.uiSessionAvailable === false ? undefined : { sessionStatus },
     slots: {
       inject(name, callback) {
-        if (name !== 'plugins.row.config') throw new Error('unexpected slot: ' + name)
+        if (name !== 'plugins.bundle.config' && name !== 'plugins.row.config') throw new Error('unexpected slot: ' + name)
+        injectedSlots.push(name)
         callback()
         return () => {}
       },
       register(slotOptions, component) {
-        registration.options = slotOptions
-        registration.component = component
-        registration.injectFace = {}
+        const current = { options: slotOptions, component, injectFace: {} }
+        registrations.push(current)
+        registration.options = current.options
+        registration.component = current.component
         if (typeof slotOptions.inject === 'function') {
           try {
-            registration.injectFace = slotOptions.inject() || {}
+            current.injectFace = slotOptions.inject() || {}
           } catch (error) {
-            registration.injectFace = {}
+            current.injectFace = {}
           }
         }
+        registration.injectFace = current.injectFace
         return () => {
-          registration.options = undefined
-          registration.component = undefined
-          registration.injectFace = {}
+          current.options = undefined
+          current.component = undefined
+          current.injectFace = {}
+          if (registration.options === slotOptions) {
+            registration.options = undefined
+            registration.component = undefined
+            registration.injectFace = {}
+          }
         }
       },
     },
@@ -351,6 +361,8 @@ export function createHarness(options = {}) {
     state,
     handlers,
     registration,
+    registrations,
+    injectedSlots,
     formSetCalls,
     /** Fire a forwarded emit event. */
     emit(event, ...args) {

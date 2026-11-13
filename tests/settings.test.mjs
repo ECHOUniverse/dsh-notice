@@ -1,6 +1,6 @@
 /**
- * Behaviour tests for the row configuration page registered into
- * `plugins.row.config`, rendered through a minimal React stub.
+ * Behaviour tests for the bundle configuration page registered into
+ * `plugins.bundle.config`, rendered through a minimal React stub.
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -22,12 +22,15 @@ function textsOf(tree) {
   return flattenTree(tree).filter((node) => typeof node === 'string')
 }
 
-test('registers a keyed page for the notice row with its locale namespace', () => {
+test('registers only the bundle configuration page with its locale namespace', () => {
   const h = createHarness()
   const options = h.registration.options
-  assert.equal(options.name, 'plugins.row.config')
-  assert.equal(options.key, '@hanxu131/dsh-notice#notice')
+  assert.deepEqual(h.injectedSlots, ['plugins.bundle.config'], 'no row configuration slot is injected')
+  assert.equal(h.registrations.length, 1, 'only one configuration page is registered')
+  assert.equal(options.name, 'plugins.bundle.config')
+  assert.equal(options.key, '@hanxu131/dsh-notice')
   assert.equal(options.locale, 'notice')
+  assert.ok(h.registrations.every((entry) => entry.options.name !== 'plugins.row.config'))
 })
 
 test('summary view reports how many notification types are enabled', () => {
@@ -64,6 +67,13 @@ test('page view renders the eight fields, the test button, and the permission ro
   assert.ok(texts.includes('发送测试通知'))
   assert.ok(texts.includes('通知权限状态'))
   assert.ok(texts.includes('已授权'))
+})
+
+test('page fills the available bundle configuration width', () => {
+  const root = flattenTree(render(createHarness())).find((node) => node?.type === 'div' && node.props?.style?.gap === '24px')
+  assert.ok(root, 'the settings root is rendered')
+  assert.equal(root.props.style.width, '100%')
+  assert.equal(root.props.style.maxWidth, undefined, 'the component must not impose a narrower max width')
 })
 
 test('sound policy control offers smart, all, and none', () => {
@@ -128,9 +138,13 @@ test('loading, unavailable, and missing forms render a note instead of crashing'
   assert.ok(textsOf(render(missing, 'page', null)).includes('正在读取配置…'))
 })
 
-test('a slot that hands no form falls back to the captured ConfigForm', () => {
+test('the bundle slot hands no form and falls back to the captured ConfigForm', () => {
   const h = createHarness({ value: ALL_ON })
-  const tree = render(h, 'page', null)
+  const tree = h.registration.component({
+    view: 'page',
+    t: h.ctx.locale.bind('notice'),
+    ...h.registration.injectFace,
+  })
   assert.equal(nodesOfType(tree, 'Switch').length, 7)
   assert.equal(nodesOfType(tree, 'SegmentedControl').length, 1)
 })

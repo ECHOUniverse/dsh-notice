@@ -1447,7 +1447,7 @@ window.__ModuleLoader__.load({
 		var testNotifications = new Set();
 		/** Inline styles keeping the page inside DSH's theme without a stylesheet. */
 		var SETTINGS_STYLES = {
-			root: { display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '720px', color: 'var(--dsw-alias-label-primary)', fontSize: '13px', lineHeight: '20px' },
+			root: { display: 'flex', flexDirection: 'column', gap: '24px', width: '100%', color: 'var(--dsw-alias-label-primary)', fontSize: '13px', lineHeight: '20px' },
 			section: { display: 'flex', flexDirection: 'column', gap: '2px' },
 			sectionTitle: { margin: '0 0 4px', fontSize: '14px', fontWeight: 500, lineHeight: '22px' },
 			row: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', padding: '10px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
@@ -1574,10 +1574,10 @@ window.__ModuleLoader__.load({
 		/**
 		 * Detect which form contract the slot owner handed to the page.
 		 *
-		 * `plugins.row.config` passes its `ConfigPageForm` (`{ state, mutate }`):
-		 * the page owner refreshes `state` through new props, so there is nothing to
-		 * subscribe to. A full `ConfigForm` (subscribe/getSnapshot/set) is also
-		 * accepted for other embedding sites and as the plugin-level fallback.
+		 * The bundle slot supplies no form, so the plugin captures a full
+		 * `ConfigForm` as fallback. For other embedding sites, an owner-supplied
+		 * `ConfigPageForm` (`{ state, mutate }`) is also accepted; its owner refreshes
+		 * `state` through new props, so there is nothing to subscribe to.
 		 *
 		 * Property access is defensive: a future form may expose a throwing getter,
 		 * and that must degrade instead of blanking the page.
@@ -1662,12 +1662,12 @@ window.__ModuleLoader__.load({
 		};
 
 		/**
-		 * The row configuration page registered into `plugins.row.config`.
+		 * The configuration page registered into `plugins.bundle.config`.
 		 *
-		 * The slot owner hands over its `ConfigPageForm` (`{ state, mutate }`) and
-		 * re-renders this page with a fresh snapshot on every change, so the body
-		 * never subscribes in that mode. A full `ConfigForm` and the plugin-captured
-		 * `ctx.configForms.get('notice')` are also supported.
+		 * The bundle slot supplies only `view`, so the page normally uses the
+		 * plugin-captured `ctx.configForms.get('notice')`. Owner-supplied
+		 * `ConfigPageForm` and full `ConfigForm` contracts remain supported for other
+		 * embedding sites; the body never subscribes in state-snapshot mode.
 		 *
 		 * @param props - `view`, the slot's `form`, the locale `t`, and the fallback form.
 		 * @returns the summary line or the configuration page.
@@ -1883,8 +1883,8 @@ window.__ModuleLoader__.load({
 			return h('div', { style: SETTINGS_STYLES.root }, children);
 		}
 
-		/** Key of this package's row configuration page. */
-		var SETTINGS_ROW_KEY = '@hanxu131/dsh-notice#notice';
+		/** Key of this package's bundle configuration page. */
+		var SETTINGS_BUNDLE_KEY = '@hanxu131/dsh-notice';
 		//#endregion
 
 		//#region triggers
@@ -1892,7 +1892,7 @@ window.__ModuleLoader__.load({
 		var inject = ['remote', 'sessions', 'configForms', 'locale', 'slots', 'uiSession'];
 
 		/**
-		 * Mount the browser half: dictionaries, event subscriptions, and the row's
+		 * Mount the browser half: dictionaries, event subscriptions, and the bundle's
 		 * configuration page.
 		 *
 		 * @param ctx - browser plugin context.
@@ -2029,10 +2029,10 @@ window.__ModuleLoader__.load({
 			}
 
 			ctx.effect(function () {
-				return ctx.slots.inject('plugins.row.config', function () {
+				return ctx.slots.inject('plugins.bundle.config', function () {
 					return ctx.slots.register({
-						name: 'plugins.row.config',
-						key: SETTINGS_ROW_KEY,
+						name: 'plugins.bundle.config',
+						key: SETTINGS_BUNDLE_KEY,
 						locale: NS,
 						inject: function () {
 							var fallback = fallbackConfigForm;

@@ -19,7 +19,7 @@
 | # | 操作 | 期望 |
 |---|---|---|
 | 1 | 侧边栏「插件」页找 `@hanxu131/dsh-notice` | 出现在已安装列表，**无激活失败提示** |
-| 2 | 该 bundle → 行 `notice` → 配置 | 看到 8 项配置 + 「发送测试通知」+ 通知权限状态 |
+| 2 | 打开该 bundle 的组合包页面 | 标题、开关、描述和 `notice` 行列表保留；描述与行列表之间看到 8 项配置 + 「发送测试通知」+ 通知权限状态；`notice` 行无「配置」控件或独立行页面 |
 | 3 | 点「发送测试通知」 | 弹出身份为 **DeepSeek Harness** 的横幅 |
 | 4 | 把「使用会话标题」开关关掉再开，保存 | 通知标题随之变化；`~/.dsh/profiles/desktop/cordis.patch.yml` 出现对应 user 层覆盖；**不需要重启** |
 | 5 | 让 agent 跑一段 >10 秒的任务，然后**切到别的 App** | 任务结束时收到「已完成 · N 秒」 |
@@ -36,7 +36,7 @@
 | 插件加载了但没有任何通知 | 先点「发送测试通知」。能弹 → 是事件订阅问题；不能弹 → 是系统授权问题（系统设置 → 通知 → DeepSeek Harness） |
 | 通知能弹但标题是目录名 | 会话还没有 title projection；`dsh-experimental-session-titles-bundle` 是否启用，或等标题生成后重试 |
 | 询问/审批卡片不出现 | 说明 waterfall 被劫持 —— 我们的处理器必须 `return next()`，检查 `src/client.js` 两个 `$on` 分支 |
-| 配置页没有「配置」入口 | 行 id 必须是 `notice`，且 `Config` 字段必须是 volatile；用 `node -e` 检查 `lib/index.js` 的 `Config` 元数据 |
+| 组合包页面看不到设置 | 确认 `lib/client.js` 注册 `plugins.bundle.config` 且 key 为 `@hanxu131/dsh-notice`；`notice` 行不应再有「配置」入口 |
 
 ## 重新构建
 
