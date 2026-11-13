@@ -7,7 +7,20 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createHarness, session, wireSession } from './helpers/client-harness.mjs'
+import { createHarness, flattenTree, session, wireSession } from './helpers/client-harness.mjs'
+
+/** Run one action while capturing `console.warn` calls; never leaks the spy. */
+function captureWarnings(run) {
+  const original = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args)
+  try {
+    run()
+  } finally {
+    console.warn = original
+  }
+  return warnings
+}
 
 test('the claimed waterfalls are not subscribed at all', () => {
   const h = createHarness()
@@ -273,14 +286,117 @@ test('English locale renders English copy', () => {
   assert.match(h.notifications()[0].options.body, /^Run failed: boom/)
 })
 
-test('clicking a notification focuses the window and closes it', () => {
+test('clicking a notification navigates to its session, focuses the window, and closes it', () => {
   const h = createHarness({ summaries: { s20: session('s20') } })
   h.emit('api-session/error', 's20', 'boom')
   const [notification] = h.notifications()
   notification.onclick()
 
+  assert.deepEqual(h.navigations(), ['s20'], 'the notification opens its own session')
   assert.equal(h.loaded.window.focusCount, 1)
   assert.equal(notification.closed, true)
+})
+
+test('question and approval clicks navigate to their own sessions', () => {
+  const cases = [
+    ['s22', (h) => h.upsertPending('s22', { sessionId: 's22', kind: 'question', key: 'question:s22:1', questions: [{}] })],
+    ['s23', (h) => h.upsertPending('s23', { sessionId: 's23', kind: 'approval', key: 'approval:s23:1', toolName: 'bash' })],
+  ]
+  for (const [sessionId, fire] of cases) {
+    const h = createHarness({ summaries: { [sessionId]: session(sessionId) } })
+    fire(h)
+    h.notifications()[0].onclick()
+    assert.deepEqual(h.navigations(), [sessionId], sessionId + ' navigates to itself')
+    assert.equal(h.loaded.window.focusCount, 1)
+    assert.equal(h.notifications()[0].closed, true)
+  }
+})
+
+test('clicking an archived session notification only focuses the window', () => {
+  const h = createHarness({ summaries: { s24: session('s24') }, archivedSessionIds: ['s24'] })
+  h.emit('api-session/error', 's24', 'boom')
+  const [notification] = h.notifications()
+  const warnings = captureWarnings(() => notification.onclick())
+
+  assert.deepEqual(h.navigations(), [], 'archived sessions are never opened')
+  assert.equal(warnings.length, 1, 'degradation warns once')
+  assert.match(String(warnings[0][0]), /session is archived/)
+  assert.equal(h.loaded.window.focusCount, 1)
+  assert.equal(notification.closed, true)
+})
+
+test('the archived set is read when the notification is clicked', () => {
+  const h = createHarness({ summaries: { s25: session('s25') } })
+  h.emit('api-session/error', 's25', 'boom')
+  const [notification] = h.notifications()
+
+  h.setArchivedSessionIds(['s25'])
+  captureWarnings(() => notification.onclick())
+
+  assert.deepEqual(h.navigations(), [], 'archiving after delivery still blocks navigation')
+  assert.equal(h.loaded.window.focusCount, 1)
+  assert.equal(notification.closed, true)
+})
+
+test('a missing workspaces service or archived field does not block navigation', () => {
+  const missingService = createHarness({ summaries: { s26: session('s26') }, workspacesAvailable: false })
+  missingService.emit('api-session/error', 's26', 'boom')
+  missingService.notifications()[0].onclick()
+  assert.deepEqual(missingService.navigations(), ['s26'])
+
+  const missingField = createHarness({ summaries: { s27: session('s27') }, workspacesSnapshot: {} })
+  missingField.emit('api-session/error', 's27', 'boom')
+  missingField.notifications()[0].onclick()
+  assert.deepEqual(missingField.navigations(), ['s27'])
+})
+
+test('clicking without the workspace navigation service only focuses the window', () => {
+  const h = createHarness({ summaries: { s28: session('s28') }, uiWorkspaceAvailable: false })
+  h.emit('api-session/error', 's28', 'boom')
+  const [notification] = h.notifications()
+
+  const warnings = captureWarnings(() => assert.doesNotThrow(() => notification.onclick()))
+
+  assert.equal(h.ctx.get('uiWorkspace'), undefined, 'the optional service stays absent')
+  assert.deepEqual(h.navigations(), [])
+  assert.equal(warnings.length, 1, 'degradation warns once')
+  assert.match(String(warnings[0][0]), /navigation is unavailable/)
+  assert.equal(h.loaded.window.focusCount, 1)
+  assert.equal(notification.closed, true)
+})
+
+test('an openSession throw degrades to focus only', () => {
+  const h = createHarness({ summaries: { s29: session('s29') }, openSessionThrows: true })
+  h.emit('api-session/error', 's29', 'boom')
+  const [notification] = h.notifications()
+
+  const warnings = captureWarnings(() => assert.doesNotThrow(() => notification.onclick()))
+
+  assert.deepEqual(h.navigations(), [])
+  assert.equal(warnings.length, 1, 'degradation warns once')
+  assert.equal(h.loaded.window.focusCount, 1)
+  assert.equal(notification.closed, true)
+})
+
+test('the settings test notification clicks focus only, without navigation', () => {
+  const h = createHarness()
+  const component = h.registration.component
+  const tree = component({ view: 'page', form: h.form, t: h.ctx.locale.bind('notice'), ...h.registration.injectFace })
+  const button = flattenTree(tree).find((node) => node !== null && typeof node === 'object' && node.type === 'Button')
+  button.props.onClick({})
+
+  const [notification] = h.notifications()
+  notification.onclick()
+
+  assert.deepEqual(h.navigations(), [], 'a test notification has no session to open')
+  assert.equal(h.loaded.window.focusCount, 1)
+  assert.equal(notification.closed, true)
+})
+
+test('workspace navigation is an optional service, never a required injection', () => {
+  const h = createHarness()
+  assert.ok(!h.loaded.module.inject.includes('uiWorkspace'), 'uiWorkspace must not be a required dependency')
+  assert.ok(!h.loaded.module.inject.includes('workspaces'), 'workspaces must not be a required dependency')
 })
 
 test('plugin teardown closes every live notification', () => {

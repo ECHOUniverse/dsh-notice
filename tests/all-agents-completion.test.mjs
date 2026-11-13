@@ -777,13 +777,14 @@ test('B10: foreground suppression at the deadline consumes the cycle without rep
   assert.equal(h.notifications().length, 1, 'a new cycle delivers normally')
 })
 
-test('completion notifications still focus the window and close on click', () => {
+test('completion notifications navigate to their session, focus the window, and close on click', () => {
   const h = createHarness({ summaries: { root: session('root') } })
   h.emit('api-session/status', 'root', true)
   h.emit('api-session/status', 'root', false)
   h.advance(2000)
   const notification = h.notifications()[0]
   notification.onclick()
+  assert.deepEqual(h.navigations(), ['root'], 'the completion opens its own session')
   assert.equal(h.loaded.window.focusCount, 1)
   assert.equal(notification.closed, true)
 })
@@ -1616,7 +1617,7 @@ test('E6: English locale renders the existing completion copy', () => {
   assert.equal(body, 'Completed · 5s · project-root', 'no new locale key is introduced')
 })
 
-test('E7: clicking a completion focuses the window and closes it', () => {
+test('E7: clicking a completion navigates to the root session, then focuses and closes', () => {
   const h = createHarness({ summaries: { root: session('root') } })
   h.emit('api-session/status', 'root', true)
   h.emit('api-session/status', 'root', false)
@@ -1624,6 +1625,7 @@ test('E7: clicking a completion focuses the window and closes it', () => {
 
   const notification = completions(h)[0]
   notification.onclick()
+  assert.deepEqual(h.navigations(), ['root'], 'the cycle notification opens the root session')
   assert.equal(h.loaded.window.focusCount, 1)
   assert.equal(notification.closed, true)
 })

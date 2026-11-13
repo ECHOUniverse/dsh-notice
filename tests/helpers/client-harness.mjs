@@ -242,6 +242,30 @@ export function createHarness(options = {}) {
   const registrations = []
   const injectedSlots = []
   const configFormAvailable = options.configFormsAvailable !== false
+  // Optional navigation services: `uiWorkspace.openSession` records every call and
+  // `workspaces.list` serves the archived-session snapshot the click path reads.
+  const navigations = []
+  const navigationState = { throws: options.openSessionThrows === true }
+  const workspacesState = { archivedSessionIds: [...(options.archivedSessionIds || [])] }
+  const uiWorkspace = options.uiWorkspaceAvailable === false
+    ? undefined
+    : {
+        openSession(sessionId) {
+          if (navigationState.throws) throw new Error('sessions.retain: unknown session ' + sessionId)
+          navigations.push(sessionId)
+          return true
+        },
+      }
+  const workspaces = options.workspacesAvailable === false
+    ? undefined
+    : {
+        list: {
+          getSnapshot() {
+            if (options.workspacesSnapshot !== undefined) return options.workspacesSnapshot
+            return { archivedSessionIds: [...workspacesState.archivedSessionIds] }
+          },
+        },
+      }
 
   const form = {
     getSnapshot() {
@@ -272,6 +296,12 @@ export function createHarness(options = {}) {
   }
 
   const ctx = {
+    /** Optional-service lookup, mirroring Cordis `ctx.get(name)`. */
+    get(name) {
+      if (name === 'uiWorkspace') return uiWorkspace
+      if (name === 'workspaces') return workspaces
+      return undefined
+    },
     locale: {
       bind(ns) {
         return (key, params) => translate(dicts, ns, state.lang, key, params)
@@ -449,6 +479,18 @@ export function createHarness(options = {}) {
     },
     notifications() {
       return FakeNotification.instances
+    },
+    /** Session ids the clicked notification asked the fake workspace service to open. */
+    navigations() {
+      return [...navigations]
+    },
+    /** Make `uiWorkspace.openSession` throw, like an unknown session does. */
+    setOpenSessionThrows(throws) {
+      navigationState.throws = throws === true
+    },
+    /** Replace the fake workspaces snapshot's archived session ids. */
+    setArchivedSessionIds(ids) {
+      workspacesState.archivedSessionIds = ids === undefined ? [] : [...ids]
     },
   }
 }

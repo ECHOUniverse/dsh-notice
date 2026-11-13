@@ -368,6 +368,61 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * Whether a session is archived according to the workspace list snapshot.
+		 *
+		 * `archivedSessionIds` lives on `workspaces.list.getSnapshot()`; every part
+		 * of that chain is optional in older deployments, so a missing service,
+		 * snapshot, or field means "not archived" and never throws.
+		 *
+		 * @param workspaces - the optional workspaces client service.
+		 * @param sessionId - session identity.
+		 * @returns true only when the snapshot lists the session as archived.
+		 */
+		function isArchivedSession(workspaces, sessionId) {
+			try {
+				if (workspaces === undefined || workspaces === null) return false;
+				var list = workspaces.list;
+				if (list === undefined || list === null || typeof list.getSnapshot !== 'function') return false;
+				var snapshot = list.getSnapshot();
+				if (snapshot === undefined || snapshot === null) return false;
+				var archived = snapshot.archivedSessionIds;
+				if (!Array.isArray(archived)) return false;
+				return archived.indexOf(sessionId) !== -1;
+			} catch (error) {
+				return false;
+			}
+		}
+
+		/**
+		 * Switch the main view to one session when the workspace navigation service
+		 * is available and the session is still open. Every failure is a silent
+		 * no-op: the caller still focuses the window and closes the notification.
+		 *
+		 * @param ctx - client plugin context.
+		 * @param sessionId - session the clicked notification belongs to.
+		 * @returns true when `openSession` was called, false when it degraded.
+		 */
+		function navigateToSession(ctx, sessionId) {
+			try {
+				var nav = ctx !== undefined && ctx !== null && typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined;
+				if (nav === undefined || nav === null || typeof nav.openSession !== 'function') {
+					console.warn('[dsh-notice] workspace navigation is unavailable; focusing the window only');
+					return false;
+				}
+				var workspaces = typeof ctx.get === 'function' ? ctx.get('workspaces') : undefined;
+				if (isArchivedSession(workspaces, sessionId)) {
+					console.warn('[dsh-notice] session is archived; focusing the window only', sessionId);
+					return false;
+				}
+				nav.openSession(sessionId);
+				return true;
+			} catch (error) {
+				console.warn('[dsh-notice] failed to navigate to the session; focusing the window only', error);
+				return false;
+			}
+		}
+
+		/**
 		 * Compose title and body for one notification.
 		 *
 		 * The title comes from the `title` session projection: the list summary's
@@ -402,8 +457,6 @@ window.__ModuleLoader__.load({
 		var live = new Map();
 		/** Monotonic key for live entries. */
 		var nextLiveKey = 0;
-		/** Session of the most recently clicked notification, reserved for M2 navigation. */
-		var lastClickedSessionId;
 		/** Sessions observed as subagent children, for filtering before the catalog catches up. */
 		var subagentSessions = new Set();
 		/** Last pending-interaction key already announced, per session (dedupe across status snapshots). */
@@ -454,6 +507,11 @@ window.__ModuleLoader__.load({
 		/**
 		 * Show one notification through the renderer's `Notification` API.
 		 *
+		 * Clicking it switches the main view to the notification's session when the
+		 * workspace navigation service allows it, then focuses the window and closes
+		 * the notification; navigation failures degrade to focus only.
+		 *
+		 * @param ctx - client plugin context.
 		 * @param t - translate function.
 		 * @param kind - trigger kind.
 		 * @param sessionId - session the notification belongs to.
@@ -461,7 +519,7 @@ window.__ModuleLoader__.load({
 		 * @param config - resolved configuration.
 		 * @param facts - session summary and projection title for the session.
 		 */
-		function showNotification(t, kind, sessionId, payload, config, facts) {
+		function showNotification(ctx, t, kind, sessionId, payload, config, facts) {
 			if (typeof Notification === 'undefined') return;
 			var copy = composeNotification(t, kind, payload, config, facts);
 			var silent = isSilent(config, kind);
@@ -471,8 +529,8 @@ window.__ModuleLoader__.load({
 				var key = nextLiveKey += 1;
 				live.set(key, { notification: notification, sessionId: sessionId });
 				notification.onclick = function () {
-					// M2 will navigate to `lastClickedSessionId`; today focus the window.
-					lastClickedSessionId = sessionId;
+					// Navigation is best-effort: focus and close happen either way.
+					navigateToSession(ctx, sessionId);
 					try {
 						window.focus();
 					} catch (error) {
@@ -547,7 +605,7 @@ window.__ModuleLoader__.load({
 				if (isForeground()) return;
 				var facts = sessionFacts(ctx, sessionId);
 				if (isSubagent(sessionId, facts)) return;
-				showNotification(t, kind, sessionId, payload, config, facts);
+				showNotification(ctx, t, kind, sessionId, payload, config, facts);
 			} catch (error) {
 				console.warn('[dsh-notice] notification dispatch failed', error);
 			}
