@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { loadClient } from './helpers/client-harness.mjs'
 
 const root = new URL('../', import.meta.url)
 const read = (path) => readFile(new URL(path, root), 'utf8')
@@ -91,4 +92,17 @@ test('profile patch inserts the notice row with the default configuration', asyn
   ]) {
     assert.ok(patch.includes(`${field}:`), `${field} appears in the patch config`)
   }
+})
+
+test('client inject declares the nested sessionStatus service it reads', () => {
+  // DSH 0.2.3-alpha.2 resolves nested services from the plugin's own Cordis
+  // inject list, so reading `ctx.uiSession.sessionStatus` requires both names.
+  // See the installed guide docs/upgrade-guide/v0.2.2-rc.2/session-status-package/guide.zh.md:24-27.
+  const { module } = loadClient()
+  const inject = [...module.inject]
+  assert.ok(inject.includes('uiSession'), 'uiSession itself is still required')
+  assert.ok(
+    inject.includes('uiSession.sessionStatus'),
+    'the bundle reads ctx.uiSession.sessionStatus (src/client.js:943 and :2003), so the nested service must be injected',
+  )
 })

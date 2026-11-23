@@ -1,7 +1,8 @@
 {
   "name": "@hanxu131/dsh-notice",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "macOS system notifications for DeepSeek Harness agent events (completion, question, approval, error), delivered by a two-half DSH plugin",
+  "icon": "icon.svg",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -18,6 +19,7 @@
   },
   "files": [
     "lib",
+    "icon.svg",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",

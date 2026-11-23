@@ -1947,7 +1947,7 @@ window.__ModuleLoader__.load({
 
 		//#region triggers
 		/** Required services: forwarded events, session status, catalog, config forms, copy, slots. */
-		var inject = ['remote', 'sessions', 'configForms', 'locale', 'slots', 'uiSession'];
+		var inject = ['remote', 'sessions', 'configForms', 'locale', 'slots', 'uiSession', 'uiSession.sessionStatus'];
 
 		/**
 		 * Mount the browser half: dictionaries, event subscriptions, and the bundle's
